@@ -9,7 +9,7 @@ import { ensureRuntime, getSandbox, hasE2bKey } from '@/lib/sandbox/manager';
 import { effectiveApiKey, effectiveModel, owner } from '@/lib/session';
 
 export const dynamic = 'force-dynamic';
-export const maxDuration = 3600;
+export const maxDuration = 60;
 
 type Body = { projectId?: string; message?: string; autoDebug?: boolean };
 
