@@ -3,11 +3,12 @@
   "version": "1.0.0",
   "private": true,
   "description": "Cloud AI Coding Agent - Next.js + Tailwind + Supabase + E2B Sandbox + OpenRouter",
-  "scripts": {
+ "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "NEXT_PUBLIC_BASE_PATH= next build",
     "start": "next start",
     "lint": "next lint"
+  },
   },
   "dependencies": {
     "@e2b/code-interpreter": "2.8.0",
