@@ -29,15 +29,26 @@ export class SqliteStore implements Store {
   constructor(filePath?: string) {
     const target = filePath || DB_PATH || DEFAULT_DB_PATH;
     this.path = target;
-    if (target !== ':memory:') {
-      fs.mkdirSync(path.dirname(target), { recursive: true });
+
+    try {
+      if (target != ':memory:') {
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+      }
+      this.db = new Database(target);
+      this.db.pragma('journal_mode = WAL');
+      this.db.pragma('synchronous = NORMAL');
+      this.db.pragma('busy_timeout = 5000');
+      this.db.pragma('foreign_keys = ON');
+      this.migrate();
+    } catch (e) {
+      console.warn('SQLite gagal diinisialisasi (Vercel Serverless mode), beralih ke in-memory fallback:', e);
+      try {
+        this.db = new Database(':memory:');
+        this.migrate();
+      } catch (err) {
+        console.error('In-memory database juga gagal:', err);
+      }
     }
-    this.db = new Database(target);
-    this.db.pragma('journal_mode = WAL');
-    this.db.pragma('synchronous = NORMAL');
-    this.db.pragma('busy_timeout = 5000');
-    this.db.pragma('foreign_keys = ON');
-    this.migrate();
   }
 
   /** Idempotent bootstrap - dibungkus satu transaksi supaya tidak fsync per statement. */
@@ -253,8 +264,13 @@ function rowToMessage(row: Row): Message {
 const globalForDb = globalThis as unknown as { __acSqlite?: SqliteStore };
 
 export function getSqliteStore(): SqliteStore {
-  if (!globalForDb.__acSqlite) {
-    globalForDb.__acSqlite = new SqliteStore();
+  try {
+    if (!globalForDb.__acSqlite) {
+      globalForDb.__acSqlite = new SqliteStore();
+    }
+    return globalForDb.__acSqlite;
+  } catch (e) {
+    console.error('Gagal mendapatkan SqliteStore:', e);
+    return new SqliteStore(':memory:');
   }
-  return globalForDb.__acSqlite;
 }
