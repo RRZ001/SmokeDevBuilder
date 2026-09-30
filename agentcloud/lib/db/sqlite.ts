@@ -23,7 +23,7 @@ type Row = Record<string, unknown>;
  * Dipakai otomatis kalau Supabase belum dikonfigurasi atau sedang tidak bisa diakses.
  */
 export class SqliteStore implements Store {
-  private db: Database.Database;
+  private db!: Database.Database;
   readonly path: string;
 
   constructor(filePath?: string) {
