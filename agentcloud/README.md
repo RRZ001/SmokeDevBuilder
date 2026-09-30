@@ -29,7 +29,7 @@ Katalog bawaan (`lib/models.ts`): **Claude Sonnet 4.5** (rekomendasi, pengganti 
 
 ---
 
-## 2. Arsitektur 
+## 2. Arsitektur  
 
 ```
 ┌─────────────── Browser (React) ───────────────┐
