@@ -1,0 +1,221 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  @apply bg-ink-950 text-ink-200 font-sans antialiased;
+}
+
+/* ---------------------------------------------------------------- scrollbar */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 148, 180, 0.35) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background-color: rgba(148, 148, 180, 0.3);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(148, 148, 180, 0.5);
+}
+
+.light-scroll {
+  scrollbar-color: rgba(99, 95, 130, 0.3) transparent;
+}
+
+.light-scroll::-webkit-scrollbar-thumb {
+  background-color: rgba(99, 95, 130, 0.28);
+}
+
+/* ------------------------------------------------------------- kode (gelap) */
+.hljs {
+  color: #d7d7e6;
+  background: transparent;
+}
+
+.hljs-comment,
+.hljs-quote {
+  color: #6c7086;
+  font-style: italic;
+}
+
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-literal,
+.hljs-doctag,
+.hljs-name,
+.hljs-strong {
+  color: #a78bfa;
+}
+
+.hljs-string,
+.hljs-regexp,
+.hljs-addition,
+.hljs-attribute,
+.hljs-meta .hljs-string {
+  color: #86efac;
+}
+
+.hljs-number,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-link,
+.hljs-selector-attr,
+.hljs-selector-pseudo,
+.hljs-template-variable,
+.hljs-variable {
+  color: #fbbf24;
+}
+
+.hljs-title,
+.hljs-section,
+.hljs-title.class_,
+.hljs-title.function_ {
+  color: #7dd3fc;
+}
+
+.hljs-type,
+.hljs-built_in,
+.hljs-class .hljs-title,
+.hljs-params {
+  color: #f0abfc;
+}
+
+.hljs-attr,
+.hljs-property {
+  color: #93c5fd;
+}
+
+.hljs-tag,
+.hljs-meta,
+.hljs-deletion {
+  color: #fca5a5;
+}
+
+.hljs-emphasis {
+  font-style: italic;
+}
+
+.hljs-strong {
+  font-weight: 600;
+}
+
+/* ------------------------------------------- markdown di panel chat (terang) */
+.md {
+  @apply text-[14.5px] leading-relaxed text-[#1F1B3A];
+  word-break: break-word;
+}
+
+.md > * + * {
+  @apply mt-3;
+}
+
+.md h1,
+.md h2,
+.md h3,
+.md h4 {
+  @apply font-semibold text-[#1F1B3A] leading-snug;
+}
+
+.md h1 {
+  @apply text-xl mt-4;
+}
+
+.md h2 {
+  @apply text-lg mt-4;
+}
+
+.md h3 {
+  @apply text-base mt-3;
+}
+
+.md p {
+  @apply text-[14.5px] leading-[1.7];
+}
+
+.md ul,
+.md ol {
+  @apply pl-5 space-y-1;
+}
+
+.md ul {
+  @apply list-disc;
+}
+
+.md ol {
+  @apply list-decimal;
+}
+
+.md li::marker {
+  @apply text-accent-500;
+}
+
+.md a {
+  @apply text-accent-600 underline underline-offset-2 break-all;
+}
+
+.md strong {
+  @apply font-semibold text-[#171334];
+}
+
+.md blockquote {
+  @apply border-l-2 border-accent-300/60 pl-3 text-muted italic;
+}
+
+.md hr {
+  @apply border-black/10;
+}
+
+.md code:not(pre code) {
+  @apply rounded-md bg-accent-50 px-1.5 py-0.5 font-mono text-[12.5px] text-accent-700;
+  border: 1px solid rgba(79, 70, 229, 0.12);
+}
+
+.md pre {
+  @apply overflow-x-auto rounded-xl border border-white/10 bg-ink-950 p-3.5 font-mono text-[12.5px] leading-relaxed text-ink-200 shadow-inner;
+}
+
+.md pre code {
+  @apply block whitespace-pre font-mono;
+  background: transparent !important;
+  padding: 0 !important;
+}
+
+.md table {
+  @apply w-full border-collapse overflow-hidden rounded-lg text-[13px];
+}
+
+.md th,
+.md td {
+  @apply border border-black/10 px-2.5 py-1.5 text-left align-top;
+}
+
+.md th {
+  @apply bg-accent-50 font-semibold;
+}
+
+.md img {
+  @apply max-w-full rounded-lg;
+}
