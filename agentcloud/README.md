@@ -2,7 +2,7 @@
 
 Agent coding AI yang **bekerja**, bukan cuma menulis contoh kode: setiap sesi proyek mendapat **Linux VM terisolasi di cloud (E2B Sandbox)**, tempat agent bisa menjalankan perintah terminal, menulis/mengedit file, menjalankan dev server, memperbaiki error-nya sendiri, dan menampilkan **live preview** di dalam aplikasi.
 
-Stack: **Next.js 15 (App Router) + React 19 + Tailwind CSS + Supabase (fallback otomatis ke SQLite) + E2B Sandbox + OpenRouter**.
+Stack: **Next.js 15 (App Router) + React 19 + Tailwind CSS + Supabase (fallback otomatis ke SQLite) + E2B Sandbox + OpenRouter**. 
 
 ---
 
