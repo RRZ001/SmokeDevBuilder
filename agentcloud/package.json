@@ -9,8 +9,6 @@
     "start": "next start",
     "lint": "next lint"
   },
-    "build:root": "NEXT_PUBLIC_BASE_PATH= next build"
-  },
   "dependencies": {
     "@e2b/code-interpreter": "2.8.0",
     "@supabase/supabase-js": "2.117.2",
@@ -23,7 +21,6 @@
     "remark-gfm": "4.0.1"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "7.6.13",
     "@types/node": "22.15.3",
     "@types/react": "19.1.2",
     "@types/react-dom": "19.1.2",
