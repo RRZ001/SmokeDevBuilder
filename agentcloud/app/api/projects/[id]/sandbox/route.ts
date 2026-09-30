@@ -7,7 +7,7 @@ import { listServers, stopServer } from '@/lib/sandbox/tools';
 import { owner } from '@/lib/session';
 
 export const dynamic = 'force-dynamic';
-export const maxDuration = 600;
+export const maxDuration = 60;
 
 type Ctx = { params: Promise<{ id: string }> };
 type Body = { action?: 'start' | 'stop' | 'reset' | 'kill' };
