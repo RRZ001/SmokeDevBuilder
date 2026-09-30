@@ -2,11 +2,11 @@
 
 Agent coding AI yang **bekerja**, bukan cuma menulis contoh kode: setiap sesi proyek mendapat **Linux VM terisolasi di cloud (E2B Sandbox)**, tempat agent bisa menjalankan perintah terminal, menulis/mengedit file, menjalankan dev server, memperbaiki error-nya sendiri, dan menampilkan **live preview** di dalam aplikasi.
 
-Stack: **Next.js 15 (App Router) + React 19 + Tailwind CSS + Supabase (fallback otomatis ke SQLite) + E2B Sandbox + OpenRouter**. 
+Stack: **Next.js 15 (App Router) + React 19 + Tailwind CSS + Supabase (fallback otomatis ke SQLite) + E2B Sandbox + OpenRouter**.
 
 ---
 
-## 1. Fitur 
+## 1. Fitur
 
 | Area | Detail |
 | --- | --- |
@@ -29,7 +29,7 @@ Katalog bawaan (`lib/models.ts`): **Claude Sonnet 4.5** (rekomendasi, pengganti 
 
 ---
 
-## 2. Arsitektur  
+## 2. Arsitektur
 
 ```
 ┌─────────────── Browser (React) ───────────────┐
@@ -270,6 +270,33 @@ Saat mempublikasikan app Node.js yang berjalan di subpath seperti ini, aktifkan 
 ### Environment di platform hosting
 Isi minimal `OPENROUTER_API_KEY` dan `E2B_API_KEY` (plus `SUPABASE_*` bila dipakai) di panel environment platform — nilainya **tidak perlu** ditulis di dalam kode.
 
+### Deploy ke Vercel (langkah rinci)
+
+1. **Push repo ke GitHub** → di Vercel: **Add New → Project → Import** repo tersebut. Framework terdeteksi otomatis sebagai Next.js; biarkan Build Command `next build` dan Output default. `server.js` **tidak dipakai** Vercel (Vercel punya runtime sendiri) — biarkan saja ada di repo, tidak mengganggu.
+2. **Environment Variables** (Project → Settings → Environment Variables):
+
+   | Nama | Nilai | Wajib |
+   | --- | --- | --- |
+   | `OPENROUTER_API_KEY` | `sk-or-v1-...` | ya (atau isi lewat UI Settings) |
+   | `E2B_API_KEY` | `e2b_...` | ya, untuk fitur eksekusi sandbox |
+   | `SUPABASE_URL` | `https://xxxx.supabase.co` | **sangat disarankan** di Vercel |
+   | `SUPABASE_SERVICE_ROLE_KEY` | service role key | **sangat disarankan** di Vercel |
+
+3. **JANGAN set `NEXT_PUBLIC_BASE_PATH` di Vercel.** Di Vercel aplikasi dilayani di root domain (`https://nama-app.vercel.app/`), jadi base path harus kosong. `next.config.mjs` sudah otomatis mendeteksi Vercel (env `VERCEL`) dan memaksa basePath `''`. Kalau variabel ini masih tertinggal bernilai `/agentcloud`, itulah penyebab klasik **halaman tampil tapi muncul "Gagal memuat workspace — Permintaan gagal (HTTP 404)"** (HTML & aset oke, tapi `fetch` diarahkan ke `/agentcloud/api/...` yang tidak ada). Hapus variabel itu, lalu **Redeploy**.
+4. **Penyimpanan di Vercel wajib Supabase.** Tanpa itu aplikasi memakai SQLite di `/tmp` (lihat `DEFAULT_SQLITE_PATH`): cukup untuk mencoba, tapi **tidak persisten** — riwayat chat & daftar proyek hilang saat instance berganti/redeploy. Banner peringatan oranye akan muncul di panel chat selama kondisi ini.
+5. **Durasi fungsi.** Vercel membatasi lama eksekusi fungsi (plan Hobby jauh lebih pendek dari Pro). Giliran agent yang meng-`npm install` + menjalankan dev server bisa melewatinya. Atur bila perlu lewat `vercel.json`:
+   ```json
+   { "functions": { "app/api/chat/route.ts": { "maxDuration": 60 } } }
+   ```
+   (naikkan sesuai plan kamu; nilai melebihi batas plan akan ditolak Vercel).
+6. **Verifikasi setelah deploy:** buka `https://<app>.vercel.app/api/health`. Yang diharapkan:
+   - `storage.active`: `"supabase"` (bukan `"sqlite"`) — kalau masih `sqlite` padahal env Supabase sudah diisi, `storage.supabaseError` menjelaskan sebabnya;
+   - `e2b.apiKey: true` dan `e2b.sdk.ok: true`.
+7. **Catatan sandbox.** SDK E2B sengaja **tidak** dimasukkan ke `serverExternalPackages` supaya ikut ter-bundle ke dalam fungsi server, dan `lib/sandbox/manager.ts` memuatnya secara *lazy + fail-soft*. Jadi kalau sandbox gagal disiapkan, chat tetap jalan dalam **mode diskusi** (dengan pesan jelas), bukan error 500 tanpa keterangan.
+
+### Deploy ke platform yang melayani subpath (mis. `/agentcloud`)
+Biarkan default: `npm run build` saat `NODE_ENV=production` memberi basePath `/agentcloud` pada build **dan** saat runtime, lalu publish dengan opsi **preserve_path_prefix** aktif.
+
 ---
 
 ## 11. Keamanan & batasan
@@ -277,6 +304,7 @@ Isi minimal `OPENROUTER_API_KEY` dan `E2B_API_KEY` (plus `SUPABASE_*` bila dipak
 - **Tanpa autentikasi.** Identitas pemilik data berasal dari cookie httpOnly anonim (`ac_owner`, fallback header dari `localStorage`). Ini cukup untuk satu pemakai/satu browser, **bukan** untuk SaaS multi-user. Untuk produksi: aktifkan Supabase Auth, isi `owner_id` dengan `auth.uid()`, dan ganti policy RLS menjadi `auth.uid()::text = owner_id`.
 - **API key hanya di server.** Key dibaca dari environment atau tabel `ac_settings`, dan tidak pernah dikirim ke browser (yang dikirim hanya versi tersamar).
 - **Pengaman perintah.** `run_command` menolak pola destruktif global (`rm -rf /`, `mkfs`, `shutdown`, `dd of=/dev/...`, fork bomb) dan membatasi path ke `/home/user/**`. Eksekusi tetap terjadi di dalam VM E2B sekali pakai — bukan di server aplikasi.
+- **Vercel/serverless: penyimpanan lokal tidak persisten.** `lib/config.ts` mengarahkan SQLite ke `/tmp` saat mendeteksi lingkungan serverless; data bisa hilang antar-instance. Gunakan Supabase untuk data permanen (peringatan tampil otomatis di UI selama belum dihubungkan).
 - **Belum ada rate limit / kuota per user.** Tiap pemanggilan model memakai kredit OpenRouter kamu; tambahkan rate limit sebelum dibuka ke publik.
 - **Peringatan Node.js 20.** `@supabase/supabase-js` mencetak deprecation warning bila berjalan di Node 20 (aplikasi tetap normal). Node 22+ menghilangkan peringatan ini. Peringatan dari `npm run build` (`@supabase/storage-js` butuh Node ≥ 22) juga hanya informatif.
 - **Yang sudah diuji** di workspace ini: build produksi, seluruh route API, streaming NDJSON, persistensi SQLite (dan fallback dari Supabase yang tidak dapat dihubungi), pemuatan daftar model live OpenRouter, tampilan desktop & mobile, serta jalur error (key invalid → pesan 401 yang ramah; tanpa key → mode diskusi). **Belum diuji** karena butuh kredit asli: panggilan model yang sukses, pembuatan sandbox E2B nyata, dan eksekusi perintah di dalamnya.
@@ -296,6 +324,9 @@ Isi minimal `OPENROUTER_API_KEY` dan `E2B_API_KEY` (plus `SUPABASE_*` bila dipak
 | Preview kosong / "server belum merespons" | Dev server belum jalan atau salah port. Jalankan dari Terminal: `npm run dev -- --host 0.0.0.0 --port 3000`, lalu klik **Cek status**. |
 | Sandbox membuat ulang terus / lambat di awal | Sandbox E2B kedaluwarsa (normal) atau Node.js sedang dipasang otomatis. Pakai template kustom (§7) untuk startup instan. |
 | Halaman tampak tanpa CSS / 404 setelah deploy | basePath build ≠ basePath runtime. Jalankan `npm run build` (NODE_ENV=production ⇒ `/agentcloud`), pastikan server dijalankan dengan `NODE_ENV=production`, lalu deploy ulang. |
+| **Di Vercel:** halaman tampil, tapi muncul "Gagal memuat workspace - Permintaan gagal (HTTP 404)" | `NEXT_PUBLIC_BASE_PATH` masih terpasang di Environment Variables Vercel. Hapus variabel itu lalu Redeploy; `lib/client.ts` juga sudah mendeteksi ulang base path dari URL aset sebagai jaring pengaman. |
+| **Di Vercel:** route apa pun yang menyentuh sandbox E2B menjawab 500 (termasuk request yang seharusnya 400) | SDK E2B di-`require` dari `node_modules` yang tidak ada di runtime fungsi. Sejak perbaikan ini `@e2b/code-interpreter` tidak lagi di `serverExternalPackages` sehingga ikut ter-bundle (verifikasi: `e2b.sdk.ok` di `/api/health`). |
+| **Di Vercel:** riwayat chat/proyek hilang setelah beberapa saat | Hosting serverless tidak punya disk persisten. Isi `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY`. |
 
 ---
 

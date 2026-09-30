@@ -41,6 +41,9 @@ export type BootstrapResponse = {
     supabaseRole: string;
     sandboxDir: string;
     defaultPreviewPort: number;
+    /** true = hosting serverless (mis. Vercel) tanpa Supabase → data tidak persisten. */
+    storageEphemeral?: boolean;
+    serverless?: boolean;
     storage: {
       configured: 'supabase' | 'sqlite';
       active: 'supabase' | 'sqlite';

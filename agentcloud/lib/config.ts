@@ -5,6 +5,20 @@
 
 export const BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH || '';
 
+/**
+ * Hosting serverless (Vercel, AWS Lambda, dsb): tidak punya disk yang
+ * persisten, sehingga SQLite hanya bisa dipakai sebagai penyimpanan sementara
+ * di /tmp. Untuk data permanen di lingkungan seperti ini WAJIB pakai Supabase.
+ */
+export const IS_VERCEL = Boolean(process.env.VERCEL || process.env.VERCEL_ENV);
+export const IS_SERVERLESS = IS_VERCEL || Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.NETLIFY);
+/** true = data lokal tidak akan bertahan antar-request (hanya di memori /tmp). */
+export const EPHEMERAL_STORAGE = IS_SERVERLESS;
+/** Lokasi default file SQLite: /tmp di serverless, ./data di server biasa. */
+export const DEFAULT_SQLITE_PATH = IS_SERVERLESS
+  ? '/tmp/agentcloud.sqlite'
+  : 'data/agentcloud.sqlite';
+
 export const OPENROUTER_API_KEY_ENV = (process.env.OPENROUTER_API_KEY || '').trim();
 export const OPENROUTER_SITE_URL = (process.env.OPENROUTER_SITE_URL || '').trim();
 export const OPENROUTER_APP_NAME = (process.env.OPENROUTER_APP_NAME || 'AgentCloud').trim();
@@ -36,6 +50,9 @@ export function capabilities() {
     supabaseRole: SUPABASE_USES_SERVICE_ROLE ? 'service_role' : SUPABASE_KEY ? 'anon' : 'none',
     sandboxDir: SANDBOX_PROJECT_DIR,
     defaultPreviewPort: DEFAULT_PREVIEW_PORT,
+    /** Serverless (mis. Vercel): tanpa Supabase data tidak bertahan antar-request. */
+    serverless: IS_SERVERLESS,
+    storageEphemeral: EPHEMERAL_STORAGE && !(SUPABASE_URL && SUPABASE_KEY),
   };
 }
 

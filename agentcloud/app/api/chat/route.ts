@@ -9,7 +9,9 @@ import { ensureRuntime, getSandbox, hasE2bKey } from '@/lib/sandbox/manager';
 import { effectiveApiKey, effectiveModel, owner } from '@/lib/session';
 
 export const dynamic = 'force-dynamic';
-export const maxDuration = 60;
+// Catatan durasi: batas waktu fungsi diatur oleh platform hosting, bukan di sini.
+// (Vercel mengabaikan nilai melebihi batas plan-nya; atur lewat `vercel.json`
+// -> {"functions": {"<path>": {"maxDuration": 60}}} sesuai plan kamu.)
 
 type Body = { projectId?: string; message?: string; autoDebug?: boolean };
 

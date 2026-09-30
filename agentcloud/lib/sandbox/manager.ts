@@ -1,7 +1,49 @@
-import { Sandbox } from '@e2b/code-interpreter';
+import type { Sandbox } from '@e2b/code-interpreter';
 import { E2B_API_KEY_ENV, E2B_SANDBOX_TIMEOUT_MS, SANDBOX_PROJECT_DIR } from '@/lib/config';
 
+export type { Sandbox };
+
 export class SandboxConfigError extends Error {}
+export class SandboxLoadError extends Error {}
+
+type E2bModule = typeof import('@e2b/code-interpreter');
+
+let sdkPromise: Promise<E2bModule> | null = null;
+
+/**
+ * SDK E2B dimuat secara LAZY (dynamic import) dan hasilnya di-cache.
+ *
+ * Alasan: kalau modul ini diimpor di top-level, kegagalan pemuatan modul
+ * (mis. paket tidak ikut ter-bundle di runtime serverless seperti Vercel)
+ * membuat SELURUH route yang mengimpornya menjawab 500 - bahkan untuk request
+ * yang seharusnya ditolak dengan pesan validasi biasa. Dengan pemuatan lazy,
+ * kegagalan itu bisa dilaporkan sebagai pesan yang jelas dan fitur sandbox saja
+ * yang nonaktif, sementara chat tetap jalan dalam mode diskusi.
+ */
+export async function loadE2bSdk(): Promise<E2bModule> {
+  if (!sdkPromise) {
+    sdkPromise = import('@e2b/code-interpreter')
+      .then((mod) => mod as E2bModule)
+      .catch((err) => {
+        sdkPromise = null; // supaya bisa dicoba lagi (mis. setelah redeploy)
+        throw new SandboxLoadError(
+          `SDK E2B gagal dimuat di runtime ini: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+  }
+  return sdkPromise;
+}
+
+/** Status pemuatan SDK E2B - dipakai endpoint /api/health untuk diagnosa. */
+export async function e2bSdkStatus(): Promise<{ ok: boolean; message: string }> {
+  if (!hasE2bKey()) return { ok: false, message: 'E2B_API_KEY belum diisi' };
+  try {
+    await loadE2bSdk();
+    return { ok: true, message: 'SDK E2B siap' };
+  } catch (err) {
+    return { ok: false, message: err instanceof Error ? err.message : String(err) };
+  }
+}
 
 export type SandboxHandle = {
   sandbox: Sandbox;
@@ -45,10 +87,11 @@ export function getTemplate(): string | undefined {
 
 export async function createSandbox(): Promise<SandboxHandle> {
   const apiKey = getE2bKey();
+  const { Sandbox: E2bSandbox } = await loadE2bSdk();
   const template = getTemplate();
   const sandbox = template
-    ? await Sandbox.create(template, { apiKey, timeoutMs: E2B_SANDBOX_TIMEOUT_MS })
-    : await Sandbox.create({ apiKey, timeoutMs: E2B_SANDBOX_TIMEOUT_MS });
+    ? await E2bSandbox.create(template, { apiKey, timeoutMs: E2B_SANDBOX_TIMEOUT_MS })
+    : await E2bSandbox.create({ apiKey, timeoutMs: E2B_SANDBOX_TIMEOUT_MS });
   cache().set(sandbox.sandboxId, sandbox);
   await ensureProjectDir(sandbox);
   return { sandbox, sandboxId: sandbox.sandboxId, created: true };
@@ -60,6 +103,7 @@ export async function createSandbox(): Promise<SandboxHandle> {
  */
 export async function getSandbox(sandboxId?: string | null, options?: { create?: boolean }): Promise<SandboxHandle> {
   const apiKey = getE2bKey();
+  const { Sandbox: E2bSandbox } = await loadE2bSdk();
   const create = options?.create ?? true;
 
   if (sandboxId) {
@@ -69,7 +113,7 @@ export async function getSandbox(sandboxId?: string | null, options?: { create?:
       return { sandbox: cached, sandboxId, created: false };
     }
     try {
-      const connected = await Sandbox.connect(sandboxId, { apiKey });
+      const connected = await E2bSandbox.connect(sandboxId, { apiKey });
       cache().set(sandboxId, connected);
       await keepAlive(connected);
       return { sandbox: connected, sandboxId, created: false };
@@ -99,7 +143,8 @@ async function keepAlive(sandbox: Sandbox): Promise<void> {
 
 export async function killSandbox(sandboxId: string): Promise<void> {
   try {
-    await Sandbox.kill(sandboxId, { apiKey: getE2bKey() });
+    const { Sandbox: E2bSandbox } = await loadE2bSdk();
+    await E2bSandbox.kill(sandboxId, { apiKey: getE2bKey() });
   } catch (err) {
     console.warn(`[sandbox] kill ${sandboxId} gagal: ${err instanceof Error ? err.message : err}`);
   }

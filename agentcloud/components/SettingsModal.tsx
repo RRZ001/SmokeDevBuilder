@@ -280,14 +280,22 @@ export default function SettingsModal({ open, onClose, settings, capabilities, o
           <section className="grid gap-3 sm:grid-cols-3">
             <StatusCard
               title="Penyimpanan"
-              ok
-              value={storage.active === 'supabase' ? 'Supabase' : 'SQLite lokal'}
+              ok={!capabilities.storageEphemeral}
+              value={
+                capabilities.storageEphemeral && !storage.supabaseConfigured
+                  ? 'Sementara (serverless)'
+                  : storage.active === 'supabase'
+                    ? 'Supabase'
+                    : 'SQLite lokal'
+              }
               hint={
                 storage.supabaseConfigured
                   ? storage.active === 'supabase'
                     ? `Aktif (${storage.supabaseRole})`
                     : `Supabase gagal, fallback otomatis: ${storage.supabaseError ?? '-'}`
-                  : 'SUPABASE_URL belum diisi - fallback otomatis aktif'
+                  : capabilities.storageEphemeral
+                    ? 'Hosting serverless: data hilang saat reload. Isi SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY untuk penyimpanan permanen.'
+                    : 'SUPABASE_URL belum diisi - fallback SQLite otomatis aktif'
               }
             />
             <StatusCard

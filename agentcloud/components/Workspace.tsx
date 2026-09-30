@@ -527,9 +527,18 @@ export default function Workspace() {
 
   const storageLabel = useMemo(() => {
     const storage = capabilities.storage;
-    if (!storage.supabaseConfigured) return 'SQLite';
+    if (!storage.supabaseConfigured) return capabilities.storageEphemeral ? 'Sementara' : 'SQLite';
     return storage.active === 'supabase' ? 'Supabase' : 'SQLite (fallback)';
-  }, [capabilities.storage]);
+  }, [capabilities.storage, capabilities.storageEphemeral]);
+
+  /**
+   * Hosting serverless (Vercel/Lambda) tidak punya disk persisten: tanpa Supabase
+   * riwayat chat & proyek hilang setiap kali instance berganti/reload.
+   */
+  const storageNotice = useMemo(() => {
+    if (!capabilities.storageEphemeral) return null;
+    return 'Penyimpanan sementara: hosting serverless (mis. Vercel) tidak menyimpan data ke disk, jadi riwayat chat & daftar proyek akan hilang setelah reload atau tidak aktif. Hubungkan Supabase (SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY di Environment Variables) agar data permanen.';
+  }, [capabilities.storageEphemeral]);
 
   if (!booted) {
     return (
@@ -662,6 +671,7 @@ export default function Workspace() {
             hasKey={settings.hasKey}
             sandboxId={sandboxId}
             storageLabel={storageLabel}
+            storageNotice={storageNotice}
             onToggleAutoDebug={setAutoDebug}
             onSend={handleSend}
             onStop={handleStop}

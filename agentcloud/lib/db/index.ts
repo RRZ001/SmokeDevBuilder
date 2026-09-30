@@ -96,16 +96,35 @@ export async function getStore(): Promise<{ store: Store; info: StoreInfo }> {
 
   const now = Date.now();
   if (!globalForStore.__acStore || !globalForStore.__acHealthAt || now - globalForStore.__acHealthAt > HEALTH_TTL_MS) {
-    const client = await getSupabaseClient();
+    let client: Awaited<ReturnType<typeof getSupabaseClient>> = null;
+    let initError: string | undefined;
+    try {
+      client = await getSupabaseClient();
+    } catch (err) {
+      // SDK Supabase gagal dimuat (mis. paket tidak ada di runtime ini):
+      // perlakukan seperti Supabase tidak tersedia -> fallback SQLite.
+      initError = err instanceof Error ? err.message : String(err);
+      console.warn(`[store] SDK Supabase gagal dimuat (${initError}). Fallback ke SQLite.`);
+    }
+
     let info: StoreInfo;
     if (!client) {
-      info = {
-        configured: 'sqlite',
-        active: 'sqlite',
-        supabaseConfigured: false,
-        supabaseRole: 'none',
-        sqlitePath: fallback.path,
-      };
+      info = initError
+        ? {
+            configured: 'supabase',
+            active: 'sqlite',
+            supabaseConfigured: true,
+            supabaseRole: SUPABASE_USES_SERVICE_ROLE ? 'service_role' : 'anon',
+            supabaseError: initError,
+            sqlitePath: fallback.path,
+          }
+        : {
+            configured: 'sqlite',
+            active: 'sqlite',
+            supabaseConfigured: false,
+            supabaseRole: 'none',
+            sqlitePath: fallback.path,
+          };
       globalForStore.__acStore = fallback;
     } else {
       const primary = new SupabaseStore(client);

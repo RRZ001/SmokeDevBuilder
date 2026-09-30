@@ -23,6 +23,7 @@ type Props = {
   hasKey: boolean;
   sandboxId: string | null;
   storageLabel: string;
+  storageNotice: string | null;
   onToggleAutoDebug: (value: boolean) => void;
   onSend: (text: string) => void;
   onStop: () => void;
@@ -40,6 +41,7 @@ export default function ChatPanel({
   hasKey,
   sandboxId,
   storageLabel,
+  storageNotice,
   onToggleAutoDebug,
   onSend,
   onStop,
@@ -116,6 +118,13 @@ export default function ChatPanel({
             memilih model, dan mengaktifkan eksekusi di cloud sandbox.
           </span>
         </button>
+      )}
+
+      {storageNotice && (
+        <div className="relative z-10 mx-4 mt-3 flex items-start gap-2 rounded-xl border border-amber-300/70 bg-amber-50/90 px-3 py-2 text-left text-[12.5px] text-amber-800 shadow-soft">
+          <WarnIcon className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>{storageNotice}</span>
+        </div>
       )}
 
       <div ref={scrollRef} className="light-scroll relative z-10 flex-1 space-y-5 overflow-y-auto px-4 py-4">

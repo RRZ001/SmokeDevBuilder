@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import Database from 'better-sqlite3';
-import { DB_PATH } from '@/lib/config';
+import { DB_PATH, DEFAULT_SQLITE_PATH } from '@/lib/config';
 import type {
   Message,
   NewMessage,
@@ -14,7 +14,10 @@ import type {
   Store,
 } from './types';
 
-export const DEFAULT_DB_PATH = path.join(process.cwd(), 'data', 'agentcloud.sqlite');
+/** Lokasi default: /tmp di hosting serverless, ./data di server biasa. */
+export const DEFAULT_DB_PATH = path.isAbsolute(DEFAULT_SQLITE_PATH)
+  ? DEFAULT_SQLITE_PATH
+  : path.join(process.cwd(), DEFAULT_SQLITE_PATH);
 
 type Row = Record<string, unknown>;
 
@@ -23,32 +26,21 @@ type Row = Record<string, unknown>;
  * Dipakai otomatis kalau Supabase belum dikonfigurasi atau sedang tidak bisa diakses.
  */
 export class SqliteStore implements Store {
-  private db!: Database.Database;
+  private db: Database.Database;
   readonly path: string;
 
   constructor(filePath?: string) {
     const target = filePath || DB_PATH || DEFAULT_DB_PATH;
     this.path = target;
-
-    try {
-      if (target != ':memory:') {
-        fs.mkdirSync(path.dirname(target), { recursive: true });
-      }
-      this.db = new Database(target);
-      this.db.pragma('journal_mode = WAL');
-      this.db.pragma('synchronous = NORMAL');
-      this.db.pragma('busy_timeout = 5000');
-      this.db.pragma('foreign_keys = ON');
-      this.migrate();
-    } catch (e) {
-      console.warn('SQLite gagal diinisialisasi (Vercel Serverless mode), beralih ke in-memory fallback:', e);
-      try {
-        this.db = new Database(':memory:');
-        this.migrate();
-      } catch (err) {
-        console.error('In-memory database juga gagal:', err);
-      }
+    if (target !== ':memory:') {
+      fs.mkdirSync(path.dirname(target), { recursive: true });
     }
+    this.db = new Database(target);
+    this.db.pragma('journal_mode = WAL');
+    this.db.pragma('synchronous = NORMAL');
+    this.db.pragma('busy_timeout = 5000');
+    this.db.pragma('foreign_keys = ON');
+    this.migrate();
   }
 
   /** Idempotent bootstrap - dibungkus satu transaksi supaya tidak fsync per statement. */
@@ -264,13 +256,8 @@ function rowToMessage(row: Row): Message {
 const globalForDb = globalThis as unknown as { __acSqlite?: SqliteStore };
 
 export function getSqliteStore(): SqliteStore {
-  try {
-    if (!globalForDb.__acSqlite) {
-      globalForDb.__acSqlite = new SqliteStore();
-    }
-    return globalForDb.__acSqlite;
-  } catch (e) {
-    console.error('Gagal mendapatkan SqliteStore:', e);
-    return new SqliteStore(':memory:');
+  if (!globalForDb.__acSqlite) {
+    globalForDb.__acSqlite = new SqliteStore();
   }
+  return globalForDb.__acSqlite;
 }
