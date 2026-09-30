@@ -1,0 +1,4 @@
+import { GET as bootstrapGET, POST as bootstrapPOST } from '../api/bootstrap/route';
+
+export const GET = bootstrapGET;
+export const POST = bootstrapPOST;
