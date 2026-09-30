@@ -6,7 +6,7 @@ Stack: **Next.js 15 (App Router) + React 19 + Tailwind CSS + Supabase (fallback 
 
 ---
 
-## 1. Fitur
+## 1. Fitur 
 
 | Area | Detail |
 | --- | --- |
