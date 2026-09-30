@@ -6,7 +6,7 @@
  * Semua path WAJIB lewat BASE (basePath) supaya tetap benar saat aplikasi
  * dipublish di subpath, mis. https://domain/agentcloud.
  */
-export const BASE = process.env.NEXT_PUBLIC_BASE_PATH || '';
+export const BASE = process.env.NEXT_PUBLIC_BASE_PATH || '/api';
 
 const OWNER_STORAGE_KEY = 'agentcloud.owner';
 
