@@ -17,7 +17,7 @@ const basePath = process.env.NEXT_PUBLIC_BASE_PATH ?? (isProduction ? '/agentclo
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  basePath: basePath || undefined,
+  basePath: '',
   reactStrictMode: true,
   poweredByHeader: false,
   eslint: { ignoreDuringBuilds: true },
