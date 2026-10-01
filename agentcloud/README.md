@@ -1,4 +1,4 @@
-# AgentCloud — Cloud AI Coding Agent
+# AgentCloud — Cloud AI Coding Agent 
 
 Agent coding AI yang **bekerja**, bukan cuma menulis contoh kode: setiap sesi proyek mendapat **Linux VM terisolasi di cloud (E2B Sandbox)**, tempat agent bisa menjalankan perintah terminal, menulis/mengedit file, menjalankan dev server, memperbaiki error-nya sendiri, dan menampilkan **live preview** di dalam aplikasi.
 
