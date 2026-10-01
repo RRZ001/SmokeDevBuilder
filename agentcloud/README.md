@@ -1,4 +1,4 @@
-# AgentCloud — Cloud AI Coding Agent 
+# AgentCloud — Cloud AI Coding Agent
 
 Agent coding AI yang **bekerja**, bukan cuma menulis contoh kode: setiap sesi proyek mendapat **Linux VM terisolasi di cloud (E2B Sandbox)**, tempat agent bisa menjalankan perintah terminal, menulis/mengedit file, menjalankan dev server, memperbaiki error-nya sendiri, dan menampilkan **live preview** di dalam aplikasi.
 
@@ -14,6 +14,8 @@ Stack: **Next.js 15 (App Router) + React 19 + Tailwind CSS + Supabase (fallback 
 | **Cloud sandbox** | Satu proyek = satu sandbox E2B. Sandbox id disimpan di database, jadi sesi bisa disambung ulang (dan otomatis dibuat baru kalau sudah kedaluwarsa). |
 | **Tool eksekusi** | `run_command`, `write_file`, `read_file`, `list_files`, `start_server`, `stop_server`, `get_preview_url`. |
 | **Auto-debugging** | Kalau sebuah perintah keluar dengan exit code ≠ 0, output error otomatis dikirim balik ke model sebagai instruksi perbaikan (maksimal 2 ronde berturut-turut, bisa dimatikan lewat toggle **Auto-debug**). |
+| **Hemat biaya** | Sandbox idle **di-pause** (E2B tidak menagih saat paused) + auto-resume; prompt caching Claude via `cache_control`; `session_id` untuk menjaga cache tetap hangat; isi file lama tidak dikirim ulang ke model; batas token keluaran; **pemakaian token & biaya tiap giliran ditampilkan di UI**. |
+| **Retry otomatis** | Error sementara dari OpenRouter (429/5xx) dicoba ulang otomatis 3× dengan menghormati `Retry-After`; statusnya terlihat live di panel chat. |
 | **Reasoning** | Delta `reasoning`/`reasoning_content` OpenRouter (DeepSeek-R1 dll) dirender sebagai blok "Proses berpikir model" yang bisa dilipat. |
 | **Live preview** | iframe ke `https://<port>-<sandbox-id>.e2b.dev`, plus tombol cek status HTTP dan ganti port. |
 | **Editor** | File tree sandbox + penampil kode dengan syntax highlighting; kamu juga bisa mengedit dan menyimpan kembali ke sandbox. |
@@ -158,6 +160,12 @@ npm run build && npm start
 | `SUPABASE_SERVICE_ROLE_KEY` | opsional | Disarankan untuk backend (melewati RLS, tetap di server). |
 | `SUPABASE_ANON_KEY` | opsional | Alternatif service role; butuh policy permisif di `supabase/schema.sql`. |
 | `E2B_SANDBOX_TIMEOUT_MS` | opsional | Masa hidup sandbox, default `600000` (10 menit). Perpanjang otomatis selama dipakai. |
+| `AGENT_MAX_OUTPUT_TOKENS` | opsional | Batas token keluaran per langkah, default `8192`. |
+| `AGENT_HISTORY_TOOL_DETAILS` | opsional | Hanya N pemanggilan tool terakhir yang isinya dikirim utuh ke model, default `4`. |
+| `AGENT_HISTORY_CHAR_BUDGET` | opsional | Batas keras ukuran prompt (karakter), default `60000`. |
+| `AGENT_HISTORY_MESSAGES` | opsional | Batas jumlah pesan dalam riwayat, default `24`. |
+| `AGENT_TOOL_OUTPUT_CHARS` | opsional | Batas hasil tool yang dikirim balik ke model, default `4000`. |
+| `OPENROUTER_BASE_URL` | opsional | Override endpoint OpenRouter (gateway/proxy sendiri). |
 | `E2B_TEMPLATE` | opsional | Nama template E2B kustom (lihat `e2b.Dockerfile`) supaya Node.js sudah terpasang sejak awal. |
 | `AGENT_MAX_STEPS` | opsional | Batas langkah tool per giliran, default `12`. |
 | `AGENT_MAX_AUTO_DEBUG` | opsional | Batas ronde auto-debug, default `2`. |
@@ -195,6 +203,46 @@ npx e2b template init                 # menghasilkan e2b.toml
 npx e2b template build                # memakai e2b.Dockerfile (Node.js + Python + git)
 # lalu set E2B_TEMPLATE=<nama-template> di environment
 ```
+
+---
+
+## 7b. Menghemat biaya (OpenRouter & E2B)
+
+Ini praktik yang sudah aktif secara default, plus cara menekan biaya lebih jauh.
+
+### Sandbox E2B: pause, bukan kill
+Aplikasi membuat sandbox dengan `lifecycle: { onTimeout: 'pause', autoResume: true }`. Artinya:
+
+- saat idle, sandbox **di-pause** — E2B **tidak menagih selama paused**, dan isinya (file proyek + memori, termasuk dev server yang jalan) tersimpan **tanpa batas waktu**;
+- begitu ada aktivitas (kirim pesan, perintah, atau membuka URL preview) sandbox **bangun sendiri** (~1 detik).
+
+Dokumentasi E2B menyatakannya eksplisit: *"You only pay while a sandbox is actively running. Once a sandbox is paused, killed or times out, billing stops immediately."*
+
+Kontrol yang berguna:
+
+| Aksi | Efek |
+| --- | --- |
+| Diamkan | Setelah `E2B_SANDBOX_TIMEOUT_MS` (default 10 menit) sandbox di-pause, tagihan berhenti |
+| Buka preview / kirim pesan | Sandbox bangun sendiri, kerja lanjut dari kondisi terakhir |
+| Tombol **Stop** atau hapus proyek | Sandbox di-*kill* permanen (bebaskan penyimpanan E2B) |
+
+Catatan: saat sandbox paused, URL preview tidak melayani request sampai ada aktivitas yang membangunkannya (klien lama terputus dan perlu connect ulang).
+
+### Token OpenRouter: yang memakan biaya dan cara menekannya
+Penyebab terbesar adalah **isi file yang dikirim ulang**: argumen `write_file` memuat isi file lengkap, dan dalam loop function calling argumen itu wajib dikirim balik di setiap langkah. Yang sudah diterapkan:
+
+1. **Kompaksi riwayat** — hanya `AGENT_HISTORY_TOOL_DETAILS` (default 4) pemanggilan tool terakhir yang isinya dikirim utuh; yang lebih lama diringkas (isi file diganti penanda ukuran). Pada kasus nyata (2 giliran, 10 file ~15 KB per file) ukuran prompt turun dari **175k → 4,3k karakter (~97% lebih kecil, ~41×)** tanpa merusak struktur tool call. Kompaksi dibuat deterministik supaya prefix prompt stabil — kalau prefix berubah tiap request, prompt cache selalu miss dan malah lebih mahal.
+2. **Prompt caching** — untuk Claude, penanda `cache_control` dipasang di system prompt dan ujung riwayat. Bagian yang sudah dibaca dibayar **~0,1×** harga input; sangat berpengaruh karena loop agent memanggil tool berkali-kali. Terlihat di UI sebagai *"N% dari cache"*.
+3. **`session_id`** — id proyek dikirim sebagai `session_id`, sehingga OpenRouter memakai *sticky routing*: permintaan lanjutan diarahkan ke provider yang sama dan cache tetap hangat.
+4. **Batas keluaran** — `AGENT_MAX_OUTPUT_TOKENS` (default 8192) mencegah model "ngobrol panjang" yang dibayar mahal.
+5. **Batas hasil tool** — `AGENT_TOOL_OUTPUT_CHARS` (default 4000) agar hasil besar tidak membengkakkan langkah-langkah berikutnya.
+6. **Transparansi** — setiap giliran menampilkan token masuk/keluar, persentase cache, dan perkiraan biaya; total sesi tampil sebagai chip di header panel chat.
+
+### Lever yang perlu keputusan kamu
+- **Pilih model sesuai tugas.** Model berlabel **hemat** (DeepSeek V3/R1) jauh lebih murah daripada Claude dan cukup untuk scaffold/refactor rutin; pakai Claude untuk arsitektur kompleks atau debugging berliku. Ganti kapan saja di Settings.
+- **Pecah tugas besar** menjadi beberapa instruksi. Satu perintah "buat seluruh game lengkap" memicu satu giliran raksasa (banyak langkah, banyak token). "Buat struktur + lobby dulu" lalu "lanjutkan fase malam" jauh lebih hemat dan lebih mudah dikoreksi.
+- **Aktifkan auto-debug hanya saat perlu.** Setiap ronde auto-debug menambah satu panggilan model. Kalau kamu ingin memeriksa error lebih dulu, matikan toggle-nya.
+- **Jangan minta agent mengulang hal yang sudah dikerjakan.** Kalau sandbox paused, cukup lanjutkan — file masih ada (tidak perlu "tulis ulang semua file").
 
 ---
 
@@ -279,11 +327,11 @@ Isi minimal `OPENROUTER_API_KEY` dan `E2B_API_KEY` (plus `SUPABASE_*` bila dipak
    | --- | --- | --- |
    | `OPENROUTER_API_KEY` | `sk-or-v1-...` | ya (atau isi lewat UI Settings) |
    | `E2B_API_KEY` | `e2b_...` | ya, untuk fitur eksekusi sandbox |
-   | `SUPABASE_URL` | `https://xxxx.supabase.co` | **sangat disarankan** di Vercel |
+   | `SUPABASE_URL` | `https://xxxx.supabase.co` (persis begini: tanpa kutip/spasi, **bukan** baris `SUPABASE_URL=...` utuh) | **sangat disarankan** di Vercel |
    | `SUPABASE_SERVICE_ROLE_KEY` | service role key | **sangat disarankan** di Vercel |
 
 3. **JANGAN set `NEXT_PUBLIC_BASE_PATH` di Vercel.** Di Vercel aplikasi dilayani di root domain (`https://nama-app.vercel.app/`), jadi base path harus kosong. `next.config.mjs` sudah otomatis mendeteksi Vercel (env `VERCEL`) dan memaksa basePath `''`. Kalau variabel ini masih tertinggal bernilai `/agentcloud`, itulah penyebab klasik **halaman tampil tapi muncul "Gagal memuat workspace — Permintaan gagal (HTTP 404)"** (HTML & aset oke, tapi `fetch` diarahkan ke `/agentcloud/api/...` yang tidak ada). Hapus variabel itu, lalu **Redeploy**.
-4. **Penyimpanan di Vercel wajib Supabase.** Tanpa itu aplikasi memakai SQLite di `/tmp` (lihat `DEFAULT_SQLITE_PATH`): cukup untuk mencoba, tapi **tidak persisten** — riwayat chat & daftar proyek hilang saat instance berganti/redeploy. Banner peringatan oranye akan muncul di panel chat selama kondisi ini.
+4. **Penyimpanan di Vercel wajib Supabase.** Kalau Supabase dikonfigurasi tetapi tidak bisa dihubungi, indikator di panel chat berubah menjadi "SQLite (fallback)" + banner peringatan, dan setiap error chat menyebutkan penyebabnya. Tanpa itu aplikasi memakai SQLite di `/tmp` (lihat `DEFAULT_SQLITE_PATH`): cukup untuk mencoba, tapi **tidak persisten** — riwayat chat & daftar proyek hilang saat instance berganti/redeploy. Banner peringatan oranye akan muncul di panel chat selama kondisi ini.
 5. **Durasi fungsi.** Vercel membatasi lama eksekusi fungsi (plan Hobby jauh lebih pendek dari Pro). Giliran agent yang meng-`npm install` + menjalankan dev server bisa melewatinya. Atur bila perlu lewat `vercel.json`:
    ```json
    { "functions": { "app/api/chat/route.ts": { "maxDuration": 60 } } }
@@ -319,9 +367,17 @@ Biarkan default: `npm run build` saat `NODE_ENV=production` memberi basePath `/a
 | Badge panel kode menulis *"sandbox mati"* / agent hanya berdiskusi | `E2B_API_KEY` belum diisi. Isi, lalu klik **Mulai sandbox**. |
 | *"OpenRouter menolak API key (401)"* di chat | Key salah/terhapus. Klik **Tes koneksi** di Settings. |
 | *"Kredit OpenRouter tidak cukup (402)"* | Isi saldo di <https://openrouter.ai/credits>. |
+| *"OpenRouter menolak sementara (429) ... could not verify available credits ... retry shortly"* | Ini **bukan** tanda saldo habis, melainkan throttle sementara di sisi OpenRouter (`openrouter_admission_control`) yang bisa muncul saat permintaan datang bertubi-tubi. Aplikasi otomatis mencoba ulang 3× mengikuti header `Retry-After` (maks 30 detik total), dan status "mencoba lagi dalam N detik" muncul di panel chat. Kalau tetap gagal: tunggu ~1 menit lalu kirim ulang pesan — pekerjaan di sandbox tidak hilang. |
 | Model menjawab 404 | Model sudah ditarik (mis. Claude 3.7/3.5 Sonnet). Pilih *Claude Sonnet 4.5* atau klik **Muat live** untuk daftar terbaru. |
 | Kartu Settings menulis *"Supabase gagal, fallback otomatis"* | `SUPABASE_URL`/key salah atau project pause. Data tetap tersimpan di SQLite; perbaiki env lalu restart. |
+| `/api/health` menulis `supabaseError: "Invalid supabaseUrl: Must be a valid HTTP or HTTPS URL."` | Nilai `SUPABASE_URL` tidak persis. Nilai yang benar hanya satu: `https://<project-ref>.supabase.co` — tanpa tanda kutip, tanpa spasi, dan bukan baris `SUPABASE_URL=...` yang ter-paste utuh. `normalizeSupabaseUrl()` menormalkan semua kesalahan itu otomatis. |
+| `/api/health` menulis `supabaseError: "[supabase:ping] Invalid path specified in request URL"` | Nilai `SUPABASE_URL` mengandung **path** (biasanya `/rest/v1` atau `/auth/v1` karena menyalin URL endpoint, bukan Project URL). supabase-js menambahkan `/rest/v1` sendiri sehingga path-nya menjadi ganda. Kode sekarang memangkasnya ke origin saja (`https://<project-ref>.supabase.co`), tapi memperbaiki nilainya tetap disarankan. |
+| Kartu Settings: *"SUPABASE_URL ada tapi formatnya tidak sah"* | Nilai tidak bisa diurai menjadi URL yang masuk akal (mis. salah tempel teks lain). Salin ulang **Project URL** dari Supabase → Project Settings → Data API. |
+| Di Vercel: proyek & riwayat chat "hilang", chat menjawab *"Proyek tidak ditemukan"* | Supabase belum benar-benar aktif sehingga aplikasi memakai SQLite di `/tmp` yang tidak bertahan antar-instance. Perbaiki `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY`, pastikan `storage.active: "supabase"` di `/api/health`, lalu muat ulang. |
 | Preview kosong / "server belum merespons" | Dev server belum jalan atau salah port. Jalankan dari Terminal: `npm run dev -- --host 0.0.0.0 --port 3000`, lalu klik **Cek status**. |
+| Preview menampilkan "Closed Port Error" / "Connection refused on port 3000" | Sandbox hidup tapi belum ada proses yang listen di port itu. Paling sering: aplikasi dibuat di sub-folder lalu server dijalankan tanpa `cwd`. Minta agent menjalankan `start_server` dengan `cwd` folder aplikasinya (mis. `werewolf-game`), atau jawab saja *"jalankan servernya"*. |
+| Preview tidak merespons, tapi proyek & file masih ada | Sandbox sedang **di-pause** (hemat biaya). Kirim pesan atau buka ulang URL preview — sandbox bangun sendiri (~1 detik). |
+| Biaya OpenRouter terasa cepat habis | Lihat baris *"Pemakaian"* di bawah balasan agent: porsi dari cache (idealnya besar) dan biayanya. Tekan biaya: pilih model berlabel **hemat** (DeepSeek), pecah tugas besar, matikan auto-debug bila tidak perlu. Lihat §7b. |
 | Sandbox membuat ulang terus / lambat di awal | Sandbox E2B kedaluwarsa (normal) atau Node.js sedang dipasang otomatis. Pakai template kustom (§7) untuk startup instan. |
 | Halaman tampak tanpa CSS / 404 setelah deploy | basePath build ≠ basePath runtime. Jalankan `npm run build` (NODE_ENV=production ⇒ `/agentcloud`), pastikan server dijalankan dengan `NODE_ENV=production`, lalu deploy ulang. |
 | **Di Vercel:** halaman tampil, tapi muncul "Gagal memuat workspace - Permintaan gagal (HTTP 404)" | `NEXT_PUBLIC_BASE_PATH` masih terpasang di Environment Variables Vercel. Hapus variabel itu lalu Redeploy; `lib/client.ts` juga sudah mendeteksi ulang base path dari URL aset sebagai jaring pengaman. |

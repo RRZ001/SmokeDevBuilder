@@ -6,6 +6,8 @@ export type ModelInfo = {
   /** true = id sudah tidak dilayani OpenRouter (ditampilkan sebagai arsip). */
   retired?: boolean;
   recommended?: boolean;
+  /** true = jauh lebih murah per token (cocok untuk tugas build/refactor besar). */
+  cheap?: boolean;
 };
 
 export const DEFAULT_MODEL = 'anthropic/claude-sonnet-4.5';
@@ -46,22 +48,27 @@ export const MODEL_CATALOG: ModelInfo[] = [
     label: 'DeepSeek V3 (0324)',
     vendor: 'DeepSeek',
     note: 'Murah, cepat, bagus untuk scaffold & refactor',
+    cheap: true,
   },
   {
     id: 'deepseek/deepseek-chat-v3.1',
     label: 'DeepSeek V3.1',
     vendor: 'DeepSeek',
+    note: 'Cepat & murah untuk tugas harian',
+    cheap: true,
   },
   {
     id: 'deepseek/deepseek-r1-0528',
     label: 'DeepSeek R1 (0528)',
     vendor: 'DeepSeek',
+    cheap: true,
     note: 'Reasoning chain-of-thought ditampilkan di panel chat',
   },
   {
     id: 'deepseek/deepseek-r1',
     label: 'DeepSeek R1',
     vendor: 'DeepSeek',
+    cheap: true,
     note: 'Reasoning chain-of-thought ditampilkan di panel chat',
   },
   {
@@ -73,6 +80,8 @@ export const MODEL_CATALOG: ModelInfo[] = [
     id: 'openai/gpt-4o-mini',
     label: 'GPT-4o mini',
     vendor: 'OpenAI',
+    note: 'Murah untuk tugas ringan',
+    cheap: true,
   },
 ];
 

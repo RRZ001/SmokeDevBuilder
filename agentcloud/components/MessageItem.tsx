@@ -62,7 +62,35 @@ function BlockView({ block }: { block: UiBlock }) {
   }
   if (block.type === 'reasoning') return <ReasoningView text={block.text} />;
   if (block.type === 'notice') return <NoticeView level={block.level} text={block.text} />;
+  if (block.type === 'usage') return <UsageView block={block} />;
   return <ToolView block={block} />;
+}
+
+/** Baris kecil pemakaian token & biaya - supaya pemakaian model terlihat jelas. */
+function UsageView({ block }: { block: { promptTokens: number; completionTokens: number; cachedTokens?: number; costUsd?: number } }) {
+  const cached = block.cachedTokens ?? 0;
+  const cachedPct = block.promptTokens > 0 ? Math.round((cached / block.promptTokens) * 100) : 0;
+  return (
+    <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted/80">
+      <span className="font-medium text-muted">Pemakaian</span>
+      <span>{fmt(block.promptTokens)} token masuk</span>
+      {cached > 0 && <span className="text-emerald-600">({cachedPct}% dari cache - hemat)</span>}
+      <span>· {fmt(block.completionTokens)} token keluar</span>
+      {typeof block.costUsd === 'number' && <span>· ≈ ${fmtCost(block.costUsd)}</span>}
+    </p>
+  );
+}
+
+function fmt(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}jt`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
+  return String(value);
+}
+
+function fmtCost(value: number): string {
+  if (value >= 1) return value.toFixed(2);
+  if (value >= 0.01) return value.toFixed(3);
+  return value.toFixed(4);
 }
 
 function ReasoningView({ text }: { text: string }) {

@@ -1,10 +1,11 @@
 'use client';
 
-import type { Block, NoticeBlock, ReasoningBlock, TextBlock, ToolBlock } from '@/lib/db/types';
+import type { Block, NoticeBlock, ReasoningBlock, TextBlock, ToolBlock, UsageBlock } from '@/lib/db/types';
 
 /** ToolBlock versi UI: menyimpan output yang sedang di-stream secara live. */
 export type UiToolBlock = ToolBlock & { liveOutput?: string };
-export type UiBlock = TextBlock | ReasoningBlock | NoticeBlock | UiToolBlock;
+export type UiUsageBlock = UsageBlock;
+export type UiBlock = TextBlock | ReasoningBlock | NoticeBlock | UiUsageBlock | UiToolBlock;
 
 export type UiMessage = {
   id: string;
@@ -39,6 +40,8 @@ export type BootstrapResponse = {
     e2bFromEnv: boolean;
     supabaseConfigured: boolean;
     supabaseRole: string;
+    /** true = SUPABASE_URL diisi tapi formatnya tidak sah. */
+    supabaseUrlInvalid?: boolean;
     sandboxDir: string;
     defaultPreviewPort: number;
     /** true = hosting serverless (mis. Vercel) tanpa Supabase → data tidak persisten. */

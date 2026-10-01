@@ -6,6 +6,9 @@ export type { Sandbox };
 export class SandboxConfigError extends Error {}
 export class SandboxLoadError extends Error {}
 
+/** File penanda di dalam sandbox: runtime sudah siap (bertahan saat pause/resume). */
+export const RUNTIME_MARKER = '/home/user/.agentcloud-runtime-ready';
+
 type E2bModule = typeof import('@e2b/code-interpreter');
 
 let sdkPromise: Promise<E2bModule> | null = null;
@@ -89,9 +92,22 @@ export async function createSandbox(): Promise<SandboxHandle> {
   const apiKey = getE2bKey();
   const { Sandbox: E2bSandbox } = await loadE2bSdk();
   const template = getTemplate();
+
+  /**
+   * lifecycle penting untuk penghematan biaya & keawetan pekerjaan:
+   *  - onTimeout: 'pause'  -> saat idle, sandbox DI-PAUSE (bukan dimatikan).
+   *    E2B tidak menagih selama sandbox paused, dan isinya (filesystem + memori,
+   *    termasuk dev server yang sedang jalan) tersimpan tanpa batas waktu.
+   *    Default E2B adalah 'kill' yang membuat seluruh proyek user hilang.
+   *  - autoResume: true    -> begitu ada aktivitas (pesan chat, perintah, atau
+   *    request HTTP ke URL preview) sandbox bangun sendiri.
+   */
+  const lifecycle = { onTimeout: 'pause' as const, autoResume: true };
+
   const sandbox = template
-    ? await E2bSandbox.create(template, { apiKey, timeoutMs: E2B_SANDBOX_TIMEOUT_MS })
-    : await E2bSandbox.create({ apiKey, timeoutMs: E2B_SANDBOX_TIMEOUT_MS });
+    ? await E2bSandbox.create(template, { apiKey, timeoutMs: E2B_SANDBOX_TIMEOUT_MS, lifecycle })
+    : await E2bSandbox.create({ apiKey, timeoutMs: E2B_SANDBOX_TIMEOUT_MS, lifecycle });
+
   cache().set(sandbox.sandboxId, sandbox);
   await ensureProjectDir(sandbox);
   return { sandbox, sandboxId: sandbox.sandboxId, created: true };
@@ -163,18 +179,26 @@ export async function ensureProjectDir(sandbox: Sandbox): Promise<void> {
 /**
  * Pastikan Node.js + npm tersedia di sandbox.
  *
- * Template default E2B belum tentu punya Node, jadi kalau belum ada kita pasang
- * otomatis (sekali per sandbox, hasilnya di-cache di memori proses).
- * Untuk startup yang instan, build template kustom lewat `e2b.Dockerfile`
- * di root repo ini lalu set E2B_TEMPLATE (lihat README).
+ * Hasil pemeriksaan ditandai dengan FILE PENANDA di dalam sandbox, bukan hanya
+ * cache memori proses. Alasannya: sandbox yang di-pause lalu bangun kembali
+ * (auto-resume) mempertahankan filesystem, dan proses server aplikasi ini juga
+ * bisa berganti (serverless). Tanpa penanda, pemeriksaan/instalasi Node akan
+ * diulang-ulang padahal sudah selesai.
  */
 export async function ensureRuntime(sandbox: Sandbox, onLog?: (text: string) => void): Promise<string> {
   const id = sandbox.sandboxId;
   if (runtimeReady().has(id)) return 'runtime sudah siap';
 
+  const marker = `${RUNTIME_MARKER}`;
   const script = `
 set -u
+if [ -f ${marker} ] && command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+  echo "OK (penanda) node $(node -v) npm $(npm -v)"
+  exit 0
+fi
 if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+  mkdir -p $(dirname ${marker}) 2>/dev/null || true
+  echo "node $(node -v) npm $(npm -v)" > ${marker} 2>/dev/null || true
   echo "OK node $(node -v) npm $(npm -v)"
   exit 0
 fi
@@ -202,6 +226,8 @@ if ! command -v node >/dev/null 2>&1; then
   $SUDO apt-get install -y nodejs npm >/dev/null 2>&1 || true
 fi
 if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+  mkdir -p $(dirname ${marker}) 2>/dev/null || true
+  echo "node $(node -v) npm $(npm -v)" > ${marker} 2>/dev/null || true
   echo "OK node $(node -v) npm $(npm -v)"
   exit 0
 fi

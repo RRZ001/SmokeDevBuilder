@@ -24,6 +24,7 @@ type Props = {
   sandboxId: string | null;
   storageLabel: string;
   storageNotice: string | null;
+  sessionUsage: { promptTokens: number; completionTokens: number; cachedTokens: number; costUsd: number; hasCost: boolean };
   onToggleAutoDebug: (value: boolean) => void;
   onSend: (text: string) => void;
   onStop: () => void;
@@ -42,6 +43,7 @@ export default function ChatPanel({
   sandboxId,
   storageLabel,
   storageNotice,
+  sessionUsage,
   onToggleAutoDebug,
   onSend,
   onStop,
@@ -96,6 +98,16 @@ export default function ChatPanel({
           title={mode === 'agent' ? `Sandbox: ${sandboxId ?? '-'}` : 'E2B_API_KEY belum diisi'}
         />
         <StatusPill tone="neutral" label={storageLabel} title="Penyimpanan riwayat chat & proyek" />
+        {(sessionUsage.promptTokens > 0 || sessionUsage.completionTokens > 0) && (
+          <StatusPill
+            tone="neutral"
+            label={usageLabel(sessionUsage)}
+            title={`Pemakaian sesi ini: ${sessionUsage.promptTokens.toLocaleString('id-ID')} token masuk` +
+              (sessionUsage.cachedTokens ? ` (${sessionUsage.cachedTokens.toLocaleString('id-ID')} dari cache)` : '') +
+              `, ${sessionUsage.completionTokens.toLocaleString('id-ID')} token keluar` +
+              (sessionUsage.hasCost ? `, ≈ $${sessionUsage.costUsd.toFixed(4)}` : '')}
+          />
+        )}
         <button
           type="button"
           onClick={onOpenSettings}
@@ -227,6 +239,13 @@ export default function ChatPanel({
       </footer>
     </section>
   );
+}
+
+/** Label chip pemakaian: biaya bila tersedia, kalau tidak jumlah token. */
+function usageLabel(usage: { promptTokens: number; completionTokens: number; costUsd: number; hasCost: boolean }): string {
+  const tokens = usage.promptTokens + usage.completionTokens;
+  const short = tokens >= 1_000_000 ? `${(tokens / 1_000_000).toFixed(1)}jt` : tokens >= 1_000 ? `${(tokens / 1_000).toFixed(1)}k` : String(tokens);
+  return usage.hasCost ? `≈ $${usage.costUsd.toFixed(4)}` : `${short} token`;
 }
 
 function StatusPill({

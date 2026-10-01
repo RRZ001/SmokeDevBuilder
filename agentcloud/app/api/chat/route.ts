@@ -3,6 +3,7 @@ import { ndjsonStream, readJson } from '@/lib/api';
 import { buildHistory } from '@/lib/agent/history';
 import { runAgent, type AgentEvent } from '@/lib/agent/loop';
 import type { AgentMode } from '@/lib/agent/prompt';
+import { capabilities } from '@/lib/config';
 import { getStore } from '@/lib/db';
 import type { Block } from '@/lib/db/types';
 import { ensureRuntime, getSandbox, hasE2bKey } from '@/lib/sandbox/manager';
@@ -31,10 +32,16 @@ export async function POST(request: Request) {
     return Response.json({ error: 'projectId dan message wajib diisi.' }, { status: 400 });
   }
 
-  const { store } = await getStore();
+  const { store, info } = await getStore();
   const project = await store.getProject(ownerId, projectId);
   if (!project) {
-    return Response.json({ error: 'Proyek tidak ditemukan.' }, { status: 404 });
+    // Penjelasan yang berguna: di hosting serverless, data lokal (SQLite) tidak
+    // bertahan sehingga proyek dari request sebelumnya bisa "hilang".
+    const ephemeral = capabilities(info.active).storageEphemeral;
+    const message = ephemeral
+      ? 'Proyek tidak ditemukan. Hosting ini (serverless) belum tersambung ke database permanen, jadi proyek & riwayat chat bisa hilang antar-request. Hubungkan Supabase lalu muat ulang halaman.'
+      : 'Proyek tidak ditemukan (mungkin sudah dihapus). Muat ulang halaman untuk menyegarkan daftar proyek.';
+    return Response.json({ error: message }, { status: 404 });
   }
 
   const settings = await store.getSettings(ownerId);
@@ -111,7 +118,7 @@ export async function POST(request: Request) {
     const blocks: Block[] = [];
     let finalText = '';
 
-    const generator = runAgent({ apiKey, model, history, userText, toolCtx, autoDebug, signal, mode });
+    const generator = runAgent({ apiKey, model, history, userText, toolCtx, autoDebug, signal, mode, sessionId: projectId });
     for await (const event of generator as AsyncGenerator<AgentEvent>) {
       if (event.type === 'done') {
         blocks.push(...event.blocks);

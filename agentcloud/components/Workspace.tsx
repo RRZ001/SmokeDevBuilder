@@ -93,6 +93,29 @@ export default function Workspace() {
 
   const activeProject = useMemo(() => projects.find((p) => p.id === activeId) ?? null, [projects, activeId]);
 
+  /**
+   * Total pemakaian token & perkiraan biaya sesi ini. Dihitung dari blok usage
+   * yang tersimpan bersama pesan, jadi angkanya tetap benar setelah reload.
+   */
+  const sessionUsage = useMemo(() => {
+    const total = { promptTokens: 0, completionTokens: 0, cachedTokens: 0, costUsd: 0, hasCost: false };
+    const scan = (blocks: UiBlock[] | null) => {
+      for (const block of blocks ?? []) {
+        if (block.type !== 'usage') continue;
+        total.promptTokens += block.promptTokens;
+        total.completionTokens += block.completionTokens;
+        total.cachedTokens += block.cachedTokens ?? 0;
+        if (typeof block.costUsd === 'number') {
+          total.costUsd += block.costUsd;
+          total.hasCost = true;
+        }
+      }
+    };
+    messages.forEach((message) => scan(message.blocks));
+    scan(live);
+    return total;
+  }, [messages, live]);
+
   const pushLine = useCallback((kind: TerminalLine['kind'], text: string) => {
     if (!text) return;
     lineId.current += 1;
@@ -274,6 +297,15 @@ export default function Workspace() {
             case 'status':
               setStatus(String(event.message));
               break;
+            case 'retry': {
+              // OpenRouter membatasi permintaan sementara (mis. 429 admission
+              // control) - aplikasi menunggu sesuai Retry-After lalu mencoba lagi.
+              const secs = Math.max(1, Math.round(Number(event.waitMs) / 1000));
+              setStatus(
+                `OpenRouter membatasi permintaan sementara — mencoba lagi dalam ${secs} detik (percobaan ${event.attempt}/${event.maxAttempts})`,
+              );
+              break;
+            }
             case 'log':
               pushLine('info', String(event.value));
               break;
@@ -332,6 +364,22 @@ export default function Workspace() {
                 method: 'POST',
                 body: JSON.stringify({ port }),
               }).catch(() => undefined);
+              break;
+            }
+            case 'usage': {
+              // Pemakaian token per langkah: diperbarui di blok usage (satu per giliran).
+              const value = event.value as { promptTokens?: number; completionTokens?: number; cachedTokens?: number; costUsd?: number };
+              const existing = blocks.findIndex((b) => b.type === 'usage');
+              const usageBlock = {
+                type: 'usage' as const,
+                promptTokens: Number(value?.promptTokens) || 0,
+                completionTokens: Number(value?.completionTokens) || 0,
+                cachedTokens: Number(value?.cachedTokens) || 0,
+                costUsd: typeof value?.costUsd === 'number' ? value.costUsd : undefined,
+              };
+              if (existing >= 0) blocks[existing] = usageBlock;
+              else blocks.push(usageBlock);
+              flush();
               break;
             }
             case 'error': {
@@ -672,6 +720,7 @@ export default function Workspace() {
             sandboxId={sandboxId}
             storageLabel={storageLabel}
             storageNotice={storageNotice}
+            sessionUsage={sessionUsage}
             onToggleAutoDebug={setAutoDebug}
             onSend={handleSend}
             onStop={handleStop}

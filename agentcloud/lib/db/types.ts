@@ -3,6 +3,14 @@ export type Role = 'user' | 'assistant' | 'system';
 export type TextBlock = { type: 'text'; text: string };
 export type ReasoningBlock = { type: 'reasoning'; text: string };
 export type NoticeBlock = { type: 'notice'; level: 'info' | 'warn' | 'error'; text: string };
+/** Pemakaian token & perkiraan biaya satu giliran (agar pemakaian terlihat). */
+export type UsageBlock = {
+  type: 'usage';
+  promptTokens: number;
+  completionTokens: number;
+  cachedTokens?: number;
+  costUsd?: number;
+};
 export type ToolBlock = {
   type: 'tool';
   id: string;
@@ -14,7 +22,7 @@ export type ToolBlock = {
 };
 
 /** Blok terurut - disimpan di kolom `parts` supaya UI bisa merender ulang chat lama. */
-export type Block = TextBlock | ReasoningBlock | NoticeBlock | ToolBlock;
+export type Block = TextBlock | ReasoningBlock | NoticeBlock | UsageBlock | ToolBlock;
 
 export type Project = {
   id: string;

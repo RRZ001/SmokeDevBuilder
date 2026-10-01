@@ -1,19 +1,20 @@
-import { MAX_AGENT_STEPS, MAX_AUTO_DEBUG_ROUNDS } from '@/lib/config';
-import type { Block, TextBlock, ToolBlock } from '@/lib/db/types';
+import { MAX_AGENT_STEPS, MAX_AUTO_DEBUG_ROUNDS, MAX_OUTPUT_TOKENS, TOOL_OUTPUT_CHARS } from '@/lib/config';
+import type { Block, TextBlock, ToolBlock, UsageBlock } from '@/lib/db/types';
 import { truncate } from '@/lib/util';
 import { TOOL_DEFINITIONS, executeTool, type ToolContext, type ToolResult } from '@/lib/sandbox/tools';
 import { autoDebugNudge, buildSystemPrompt, stepBudgetNotice, type AgentMode } from './prompt';
-import { OpenRouterError, streamChat, type ChatMsg } from './openrouter';
+import { OpenRouterError, streamChat, type ChatMsg, type UsageInfo } from './openrouter';
 
 export type AgentEvent =
   | { type: 'status'; message: string }
+  | { type: 'retry'; attempt: number; maxAttempts: number; waitMs: number; reason: string }
   | { type: 'text'; value: string }
   | { type: 'reasoning'; value: string }
   | { type: 'tool_start'; id: string; name: string; args: Record<string, unknown> }
   | { type: 'tool_output'; id: string; value: string }
   | { type: 'tool_result'; id: string; name: string; ok: boolean; output: string; previewUrl?: string }
   | { type: 'preview'; url: string; port: number }
-  | { type: 'usage'; value: unknown }
+  | { type: 'usage'; value: UsageInfo }
   | { type: 'error'; message: string }
   | { type: 'done'; blocks: Block[]; content: string; finishReason?: string };
 
@@ -29,6 +30,8 @@ export type RunAgentOptions = {
   signal?: AbortSignal;
   /** 'agent' = tool eksekusi sandbox aktif; 'chat' = hanya diskusi/nasihat. */
   mode?: AgentMode;
+  /** Kunci sesi OpenRouter (mis. id proyek) untuk menjaga prompt cache tetap hangat. */
+  sessionId?: string;
 };
 
 /**
@@ -36,7 +39,7 @@ export type RunAgentOptions = {
  * Semua kejadian di-stream sebagai AgentEvent (dipakai route /api/chat).
  */
 export async function* runAgent(options: RunAgentOptions): AsyncGenerator<AgentEvent> {
-  const { apiKey, model, userText, signal } = options;
+  const { apiKey, model, userText, signal, sessionId } = options;
   const toolCtx = options.toolCtx ?? null;
   const autoDebug = options.autoDebug ?? true;
   const mode: AgentMode = options.mode ?? 'agent';
@@ -51,6 +54,8 @@ export async function* runAgent(options: RunAgentOptions): AsyncGenerator<AgentE
   ];
 
   const blocks: Block[] = [];
+  // Total pemakaian token satu giliran (semua langkah) untuk ditampilkan ke user.
+  const turnUsage: UsageInfo = { promptTokens: 0, completionTokens: 0, cachedTokens: 0, costUsd: undefined };
   let finalText = '';
   let debugRounds = 0;
   let step = 0;
@@ -68,7 +73,10 @@ export async function* runAgent(options: RunAgentOptions): AsyncGenerator<AgentE
       let calls: Array<{ id: string; name: string; arguments: string }> = [];
       let finishReason: string | undefined;
 
-      for await (const event of streamChat({ apiKey, model, messages, tools, signal })) {
+      // Akumulasi pemakaian token pada langkah ini (untuk ditampilkan ke user).
+      const stepUsage: UsageInfo = { promptTokens: 0, completionTokens: 0, cachedTokens: 0, costUsd: undefined };
+
+      for await (const event of streamChat({ apiKey, model, messages, tools, signal, maxTokens: MAX_OUTPUT_TOKENS, sessionId })) {
         if (event.type === 'text') {
           textBuffer += event.value;
           if (!textBlock) {
@@ -87,10 +95,27 @@ export async function* runAgent(options: RunAgentOptions): AsyncGenerator<AgentE
         } else if (event.type === 'tool_calls') {
           calls = event.calls;
         } else if (event.type === 'usage') {
-          yield { type: 'usage', value: event.value };
+          stepUsage.promptTokens += event.value.promptTokens;
+          stepUsage.completionTokens += event.value.completionTokens;
+          stepUsage.cachedTokens = (stepUsage.cachedTokens ?? 0) + (event.value.cachedTokens ?? 0);
+          if (typeof event.value.costUsd === 'number') {
+            stepUsage.costUsd = (stepUsage.costUsd ?? 0) + event.value.costUsd;
+          }
+          // stepUsage = pemakaian langkah ini; ditampilkan langsung di UI.
+          yield { type: 'usage', value: stepUsage };
+        } else if (event.type === 'retry') {
+          yield event; // diteruskan apa adanya ke UI (ditampilkan sebagai status)
         } else if (event.type === 'done') {
           finishReason = event.finishReason;
         }
+      }
+
+      // Akumulasi ke total satu giliran (dipakai untuk blok usage yang disimpan).
+      turnUsage.promptTokens += stepUsage.promptTokens;
+      turnUsage.completionTokens += stepUsage.completionTokens;
+      turnUsage.cachedTokens = (turnUsage.cachedTokens ?? 0) + (stepUsage.cachedTokens ?? 0);
+      if (typeof stepUsage.costUsd === 'number') {
+        turnUsage.costUsd = (turnUsage.costUsd ?? 0) + stepUsage.costUsd;
       }
 
       if (textBuffer.trim()) finalText = finalText ? `${finalText}\n${textBuffer}` : textBuffer;
@@ -169,7 +194,14 @@ export async function* runAgent(options: RunAgentOptions): AsyncGenerator<AgentE
           yield { type: 'preview', url: result.previewUrl, port: result.port ?? 3000 };
         }
 
-        messages.push({ role: 'tool', tool_call_id: call.id, name: call.name, content: result.output });
+        // Dibatas agar hasil besar (mis. isi file) tidak membengkakkan prompt
+        // di setiap langkah berikutnya - lihat AGENT_TOOL_OUTPUT_CHARS.
+        messages.push({
+          role: 'tool',
+          tool_call_id: call.id,
+          name: call.name,
+          content: truncate(result.output, TOOL_OUTPUT_CHARS),
+        });
       }
 
       if (signal?.aborted) break;
@@ -193,7 +225,7 @@ export async function* runAgent(options: RunAgentOptions): AsyncGenerator<AgentE
       yield { type: 'status', message: 'Batas langkah tercapai, meminta ringkasan…' };
       messages.push({ role: 'user', content: stepBudgetNotice() });
       let summaryBlock: TextBlock | null = null;
-      for await (const event of streamChat({ apiKey, model, messages, signal })) {
+      for await (const event of streamChat({ apiKey, model, messages, signal, maxTokens: MAX_OUTPUT_TOKENS, sessionId })) {
         if (event.type === 'text') {
           if (!summaryBlock) {
             summaryBlock = { type: 'text', text: '' };
@@ -215,6 +247,20 @@ export async function* runAgent(options: RunAgentOptions): AsyncGenerator<AgentE
   }
 
   void hitStepLimit;
+
+  // Ringkasan pemakaian giliran ini: terlihat oleh user (transparansi biaya)
+  // dan tersimpan bersama pesan sehingga bisa ditinjau ulang.
+  if (turnUsage.promptTokens || turnUsage.completionTokens) {
+    const usageBlock: UsageBlock = {
+      type: 'usage',
+      promptTokens: turnUsage.promptTokens,
+      completionTokens: turnUsage.completionTokens,
+      cachedTokens: turnUsage.cachedTokens,
+      costUsd: turnUsage.costUsd,
+    };
+    blocks.push(usageBlock);
+  }
+
   yield { type: 'done', blocks, content: finalText };
 }
 

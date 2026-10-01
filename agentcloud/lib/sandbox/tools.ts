@@ -276,6 +276,11 @@ export const TOOL_DEFINITIONS = [
         properties: {
           command: { type: 'string', description: 'Perintah server yang dijalankan di background.' },
           port: { type: 'number', description: 'Port HTTP yang dipakai server (default 3000).' },
+          cwd: {
+            type: 'string',
+            description:
+              'Direktori kerja server, relatif terhadap folder proyek. WAJIB diisi bila aplikasi dibuat di sub-folder (mis. "werewolf-game"), supaya npm/pnpm menemukan package.json yang benar.',
+          },
         },
         required: ['command'],
       },
@@ -361,11 +366,15 @@ export async function executeTool(ctx: ToolContext, name: string, rawArgs: Recor
         const command = String(args.command ?? '').trim();
         if (!command) return { ok: false, output: 'Parameter `command` wajib diisi.' };
         const port = clamp(Number(args.port) || 3000, 1024, 65535);
-        const res = await startServer(ctx.sandbox, command, port, { onOutput: ctx.onOutput });
+        // Aplikasi bisa berada di sub-folder (mis. /home/user/project/werewolf-game),
+        // jadi cwd harus dihormati agar package.json yang benar ditemukan.
+        const cwd = args.cwd ? resolvePath(String(args.cwd)) : SANDBOX_PROJECT_DIR;
+        const res = await startServer(ctx.sandbox, command, port, { onOutput: ctx.onOutput, cwd });
         return {
           ok: res.ready,
           output: [
             `preview_url: ${res.previewUrl}`,
+            `cwd: ${relPath(cwd, SANDBOX_PROJECT_DIR) || '.'}`,
             `status: ${res.ready ? 'server merespons HTTP' : 'server belum merespons dalam 30 detik'}`,
             res.logs ? `logs:\n${truncate(res.logs, 3_000)}` : 'logs: (kosong)',
           ].join('\n'),

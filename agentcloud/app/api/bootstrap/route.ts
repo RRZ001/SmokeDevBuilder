@@ -21,7 +21,7 @@ export async function GET() {
       settings: { ...serializeSettings(settings), model: effectiveModel(settings) },
       projects,
       capabilities: {
-        ...capabilities(),
+        ...capabilities(info.active),
         storage: {
           configured: info.configured,
           active: info.active,

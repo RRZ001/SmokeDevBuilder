@@ -12,6 +12,7 @@ type ModelOption = {
   note?: string;
   retired?: boolean;
   recommended?: boolean;
+  cheap?: boolean;
 };
 
 type ModelsResponse = {
@@ -201,7 +202,14 @@ export default function SettingsModal({ open, onClose, settings, capabilities, o
                 <span className="min-w-0 flex-1 truncate text-[12.5px] text-ink-200">
                   {selected ? `${selected.label} — ${selected.id}` : model}
                 </span>
-                {selected?.retired && (
+                <p className="mt-2 rounded-lg border border-emerald-400/20 bg-emerald-400/[0.07] px-3 py-2 text-[11.5px] leading-relaxed text-emerald-200">
+              <strong className="font-semibold">Hemat token:</strong> bagian percakapan yang sudah dibaca otomatis di-cache
+              (Claude), dan isi file lama tidak dikirim ulang ke model. Untuk tugas build/refactor besar, model berlabel{' '}
+              <em>hemat</em> (DeepSeek) bisa jauh lebih murah daripada Claude dengan hasil yang setara untuk pekerjaan rutin.
+              Pemakaian token &amp; perkiraan biaya tiap giliran tampil di bawah balasan agent.
+            </p>
+
+            {selected?.retired && (
                   <span className="shrink-0 rounded-full bg-amber-400/15 px-2 py-0.5 text-[10.5px] text-amber-300">arsip</span>
                 )}
                 <ChevronIcon className={`h-4 w-4 shrink-0 text-ink-400 transition-transform ${dropdown ? 'rotate-180' : ''}`} />
@@ -254,6 +262,11 @@ export default function SettingsModal({ open, onClose, settings, capabilities, o
                                 arsip
                               </span>
                             )}
+                            {option.cheap && (
+                              <span className="shrink-0 rounded-full bg-emerald-400/15 px-1.5 py-0.5 text-[10px] text-emerald-300">
+                                hemat
+                              </span>
+                            )}
                           </span>
                           <span className="mt-0.5 block truncate font-mono text-[11px] text-ink-400">{option.id}</span>
                           {option.note && <span className="mt-0.5 block text-[11px] text-ink-500">{option.note}</span>}
@@ -266,6 +279,13 @@ export default function SettingsModal({ open, onClose, settings, capabilities, o
                 </div>
               )}
             </div>
+
+            <p className="mt-2 rounded-lg border border-emerald-400/20 bg-emerald-400/[0.07] px-3 py-2 text-[11.5px] leading-relaxed text-emerald-200">
+              <strong className="font-semibold">Hemat token:</strong> bagian percakapan yang sudah dibaca otomatis di-cache
+              (Claude), dan isi file lama tidak dikirim ulang ke model. Untuk tugas build/refactor besar, model berlabel{' '}
+              <em>hemat</em> (DeepSeek) bisa jauh lebih murah daripada Claude dengan hasil yang setara untuk pekerjaan rutin.
+              Pemakaian token &amp; perkiraan biaya tiap giliran tampil di bawah balasan agent.
+            </p>
 
             {selected?.retired && (
               <p className="mt-2 flex items-start gap-1.5 text-[11.5px] text-amber-300">
@@ -289,13 +309,15 @@ export default function SettingsModal({ open, onClose, settings, capabilities, o
                     : 'SQLite lokal'
               }
               hint={
-                storage.supabaseConfigured
-                  ? storage.active === 'supabase'
-                    ? `Aktif (${storage.supabaseRole})`
-                    : `Supabase gagal, fallback otomatis: ${storage.supabaseError ?? '-'}`
-                  : capabilities.storageEphemeral
-                    ? 'Hosting serverless: data hilang saat reload. Isi SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY untuk penyimpanan permanen.'
-                    : 'SUPABASE_URL belum diisi - fallback SQLite otomatis aktif'
+                capabilities.supabaseUrlInvalid
+                  ? 'SUPABASE_URL ada tapi formatnya tidak sah. Isi persis: https://<project-ref>.supabase.co (tanpa /rest/v1, tanpa kutip, tanpa spasi).'
+                  : storage.supabaseConfigured
+                    ? storage.active === 'supabase'
+                      ? `Aktif (${storage.supabaseRole})`
+                      : `Supabase gagal, fallback otomatis: ${storage.supabaseError ?? '-'}`
+                    : capabilities.storageEphemeral
+                      ? 'Hosting serverless: data hilang saat reload. Isi SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY untuk penyimpanan permanen.'
+                      : 'SUPABASE_URL belum diisi - fallback SQLite otomatis aktif'
               }
             />
             <StatusCard
