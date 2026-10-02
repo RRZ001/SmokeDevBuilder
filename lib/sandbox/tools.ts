@@ -1,5 +1,20 @@
 import type { Sandbox } from '@e2b/code-interpreter';
 import { SANDBOX_PROJECT_DIR } from '@/lib/config';
+import {
+  decideServerReadiness,
+  detectFrameworkFromPackageJson,
+  evaluatePublicProbe,
+  hostOverrideFor,
+  parseListenScope,
+  parseReadiness,
+  parseServerRegistry,
+  serializeServerRegistry,
+  type FrameworkHint,
+  type ListenScope,
+  type PublicProbe,
+  type Readiness,
+  type ServerRecord,
+} from '@/lib/sandbox/preview-status';
 import { humanSize, joinSandboxPath, normalize, relPath, truncate } from '@/lib/util';
 
 export type ToolContext = {
@@ -141,44 +156,287 @@ export async function writeProjectFile(sandbox: Sandbox, path: string, content: 
   return { path: relPath(abs, SANDBOX_PROJECT_DIR), bytes: Buffer.byteLength(content, 'utf8') };
 }
 
-export async function startServer(
-  sandbox: Sandbox,
-  command: string,
-  port: number,
-  options: { cwd?: string; onOutput?: (text: string) => void } = {},
-): Promise<{ previewUrl: string; ready: boolean; logs: string }> {
-  assertSafeCommand(command);
-  const existing = servers(sandbox.sandboxId).get(port);
-  if (existing) {
-    await stopServer(sandbox, port).catch(() => undefined);
+/**
+ * Catatan server yang pernah dijalankan, disimpan DI DALAM sandbox.
+ *
+ * Kenapa di sandbox, bukan di database/memori server: (1) bertahan saat sandbox
+ * di-pause lalu bangun (memory+disk disimpan E2B), padahal proses server
+ * aplikasi ini bisa berganti (serverless); (2) otomatis ikut terhapus saat
+ * sandbox dibunuh, jadi tidak ada catatan basi yang menunjuk sandbox lain.
+ */
+export const SERVER_REGISTRY_PATH = '/home/user/.agentcloud-servers.json';
+
+export async function readServerRegistry(sandbox: Sandbox): Promise<ServerRecord[]> {
+  try {
+    const raw = await sandbox.files.read(SERVER_REGISTRY_PATH);
+    return parseServerRegistry(typeof raw === 'string' ? raw : String(raw));
+  } catch {
+    return [];
   }
+}
 
-  const handle = await sandbox.commands.run(command, {
-    background: true,
-    cwd: options.cwd || SANDBOX_PROJECT_DIR,
-    onStdout: options.onOutput ? (chunk) => options.onOutput?.(chunk) : undefined,
-    onStderr: options.onOutput ? (chunk) => options.onOutput?.(chunk) : undefined,
-  });
+async function writeServerRegistry(sandbox: Sandbox, records: ServerRecord[]): Promise<void> {
+  try {
+    await sandbox.files.write(SERVER_REGISTRY_PATH, serializeServerRegistry(records));
+  } catch {
+    /* registry hanya untuk pemulihan otomatis - jangan gagalkan start server */
+  }
+}
 
-  servers(sandbox.sandboxId).set(port, { pid: handle.pid, command, startedAt: Date.now() });
+async function rememberServer(sandbox: Sandbox, record: ServerRecord): Promise<void> {
+  const records = await readServerRegistry(sandbox);
+  await writeServerRegistry(sandbox, [...records.filter((r) => r.port !== record.port), record]);
+}
 
-  // Tunggu sampai port benar-benar melayani HTTP (compile dev server bisa butuh waktu).
-  const wait = `
-for i in $(seq 1 60); do
-  code=$(curl -s -o /dev/null -m 3 -w "%{http_code}" http://127.0.0.1:${port}/ 2>/dev/null || echo 000)
+async function forgetServer(sandbox: Sandbox, port: number): Promise<void> {
+  const records = await readServerRegistry(sandbox);
+  if (!records.some((r) => r.port === port)) return;
+  await writeServerRegistry(sandbox, records.filter((r) => r.port !== port));
+}
+
+/**
+ * Cek port dari DALAM sandbox: status HTTP di localhost + alamat bind yang
+ * sebenarnya. Bind hanya ke 127.0.0.1 adalah penyebab nomor satu URL preview
+ * E2B menjawab "Closed Port Error", jadi hasilnya dipakai untuk mendiagnosa.
+ */
+export async function probeLocalPort(
+  sandbox: Sandbox,
+  port: number,
+): Promise<{ code: string; scope: ListenScope }> {
+  const script = `
+code=$(curl -s -o /dev/null -m 4 -w "%{http_code}" http://127.0.0.1:${port}/ 2>/dev/null || echo 000)
+echo "CODE \${code}"
+if command -v ss >/dev/null 2>&1 || command -v netstat >/dev/null 2>&1; then
+  echo "SCAN ok"
+  (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | awk 'NR>1 {print $4}' | grep -E "[:.]${port}\$" || true
+else
+  echo "SCAN unavailable"
+fi
+`.trim();
+  const res = await runCommand(sandbox, script, { cwd: '/', timeoutMs: 25_000 });
+  const out = res.stdout || '';
+  const code = out.match(/CODE\s+(\d{3})/)?.[1] ?? '000';
+  const scope: ListenScope = out.includes('SCAN unavailable')
+    ? 'unknown'
+    : parseListenScope(out.replace(/CODE\s+\d{3}/, '').replace(/SCAN ok/, ''), port);
+  return { code, scope };
+}
+
+/** Cek URL preview publik (dari sisi server aplikasi ini, bukan dari sandbox). */
+export async function probePublicUrl(url: string, timeoutMs = 6_000): Promise<PublicProbe> {
+  try {
+    const res = await fetch(url, {
+      redirect: 'manual',
+      signal: AbortSignal.timeout(timeoutMs),
+      headers: { 'user-agent': 'agentcloud-preview-probe' },
+    });
+    const body = await res.text().catch(() => '');
+    return evaluatePublicProbe(res.status, body.slice(0, 4_000));
+  } catch {
+    return evaluatePublicProbe(0, '');
+  }
+}
+
+/** Skrip penunggu: selesai lebih cepat kalau prosesnya sudah mati (bukan 30 detik buta). */
+export function readinessScript(port: number, pid?: number): string {
+  const alive = pid ? `if ! kill -0 ${pid} 2>/dev/null; then echo "DEAD"; exit 2; fi` : '';
+  return `
+for i in $(seq 1 40); do
+  ${alive}
+  code=$(curl -s -o /dev/null -m 2 -w "%{http_code}" http://127.0.0.1:${port}/ 2>/dev/null || echo 000)
   if [ "$code" != "000" ] && [ -n "$code" ]; then echo "READY $code"; exit 0; fi
   sleep 0.5
 done
 echo "TIMEOUT"
 exit 1
 `.trim();
-  const probe = await runCommand(sandbox, wait, { cwd: '/', timeoutMs: 90_000 });
-  const ready = probe.ok;
+}
 
-  await new Promise((r) => setTimeout(r, 700));
-  const logs = truncate([handle.stdout, handle.stderr].filter(Boolean).join('\n'), 4_000);
+/** Baca package.json di folder kerja server untuk menebak framework-nya. */
+export async function readFrameworkHint(sandbox: Sandbox, cwd: string): Promise<FrameworkHint> {
+  try {
+    const raw = await sandbox.files.read(`${cwd.replace(/\/$/, '')}/package.json`);
+    return detectFrameworkFromPackageJson(typeof raw === 'string' ? raw : String(raw));
+  } catch {
+    return null;
+  }
+}
 
-  return { previewUrl: `https://${sandbox.getHost(port)}`, ready, logs };
+export type StartServerOutcome = {
+  previewUrl: string;
+  /** true HANYA kalau URL publik benar-benar melayani aplikasi user. */
+  ready: boolean;
+  logs: string;
+  reason: string | null;
+  warning: string | null;
+  command: string;
+  /** true = perintah dijalankan ulang dengan flag bind 0.0.0.0. */
+  rebound: boolean;
+  localCode: string;
+  listenScope: ListenScope;
+  publicStatus: string;
+};
+
+type LaunchAttempt = {
+  readiness: Readiness;
+  localCode: string;
+  listenScope: ListenScope;
+  publicProbe: PublicProbe;
+  logs: string;
+};
+
+/**
+ * Jalankan dev/preview server di background, lalu PASTIKAN benar-benar bisa
+ * dipakai lewat URL publik E2B.
+ *
+ * Tidak cukup `curl 127.0.0.1` dari dalam sandbox: server yang hanya listen di
+ * loopback menjawab 200 di situ, sementara proxy E2B (di luar network namespace
+ * sandbox) menolak dengan "Closed Port Error". Karena itu kesiapan dinilai dari
+ * URL publik; kalau ternyata cuma loopback, perintah dicoba ulang sekali dengan
+ * flag bind 0.0.0.0 yang sesuai framework-nya.
+ */
+export async function startServer(
+  sandbox: Sandbox,
+  command: string,
+  port: number,
+  options: {
+    cwd?: string;
+    onOutput?: (text: string) => void;
+    probePublic?: (url: string) => Promise<PublicProbe>;
+  } = {},
+): Promise<StartServerOutcome> {
+  assertSafeCommand(command);
+  const cwd = options.cwd || SANDBOX_PROJECT_DIR;
+  const probePublic = options.probePublic ?? ((target: string) => probePublicUrl(target));
+  const url = previewAddress(sandbox, port);
+
+  await stopServer(sandbox, port).catch(() => undefined);
+
+  const launch = async (cmd: string): Promise<LaunchAttempt> => {
+    const handle = await sandbox.commands.run(cmd, {
+      background: true,
+      cwd,
+      onStdout: options.onOutput ? (chunk) => options.onOutput?.(chunk) : undefined,
+      onStderr: options.onOutput ? (chunk) => options.onOutput?.(chunk) : undefined,
+    });
+    servers(sandbox.sandboxId).set(port, { pid: handle.pid, command: cmd, startedAt: Date.now() });
+
+    const probe = await runCommand(sandbox, readinessScript(port, handle.pid), { cwd: '/', timeoutMs: 120_000 });
+    const readiness = parseReadiness(`${probe.stdout}\n${probe.stderr}`);
+
+    await new Promise((r) => setTimeout(r, 500));
+    const logs = truncate([handle.stdout, handle.stderr].filter(Boolean).join('\n'), 4_000);
+
+    if (readiness.state === 'dead' || readiness.state === 'timeout') {
+      return {
+        readiness,
+        localCode: '000',
+        listenScope: 'none',
+        publicProbe: { status: '000', online: false, proxyError: false },
+        logs,
+      };
+    }
+
+    const local = await probeLocalPort(sandbox, port);
+    const publicProbe = await probePublic(url);
+    return { readiness, localCode: local.code, listenScope: local.scope, publicProbe, logs };
+  };
+
+  let currentCommand = command;
+  let attempt = await launch(currentCommand);
+  let rebound = false;
+
+  // Server hidup tapi hanya listen di loopback → coba sekali lagi dengan bind 0.0.0.0.
+  // Framework ditebak dari package.json supaya perintah generik seperti
+  // `npm run dev` pun bisa ditambal.
+  if (
+    !attempt.publicProbe.online &&
+    attempt.localCode !== '000' &&
+    attempt.listenScope !== 'all' &&
+    attempt.readiness.state !== 'dead'
+  ) {
+    const framework = await readFrameworkHint(sandbox, cwd);
+    const override = hostOverrideFor(currentCommand, framework);
+    if (override) {
+      await stopServer(sandbox, port).catch(() => undefined);
+      currentCommand = override;
+      attempt = await launch(currentCommand);
+      rebound = true;
+    }
+  }
+
+  const decision = decideServerReadiness({
+    localCode: attempt.localCode,
+    listenScope: attempt.listenScope,
+    publicProbe: attempt.publicProbe,
+  });
+
+  if (decision.ready) {
+    await rememberServer(sandbox, { port, command: currentCommand, cwd, startedAt: Date.now() });
+  } else if (attempt.readiness.state === 'dead' || attempt.readiness.state === 'timeout') {
+    // Jangan simpan perintah yang gagal: pemulihan otomatis berikutnya hanya
+    // akan mengulang kegagalan yang sama.
+    await forgetServer(sandbox, port);
+  }
+
+  return {
+    previewUrl: url,
+    ready: decision.ready,
+    logs: attempt.logs,
+    reason: decision.reason,
+    warning: decision.warning,
+    command: currentCommand,
+    rebound,
+    localCode: attempt.localCode,
+    listenScope: attempt.listenScope,
+    publicStatus: attempt.publicProbe.status,
+  };
+}
+
+export type ReviveOutcome = {
+  /** false = tidak ada catatan perintah untuk port ini (tidak ada yang bisa dijalankan ulang). */
+  attempted: boolean;
+  ready: boolean;
+  previewUrl: string;
+  port: number;
+  command: string | null;
+  logs: string;
+  reason: string | null;
+};
+
+/**
+ * Hidupkan ulang dev server dari catatan perintah terakhir di sandbox.
+ *
+ * Ini yang membuat panel Preview "sembuh sendiri": setelah sandbox di-pause
+ * lama (proses dev server hilang saat bangun) atau setelah sandbox cold-boot,
+ * membuka/menyegarkan Preview akan menjalankan ulang servernya.
+ */
+export async function reviveServer(
+  sandbox: Sandbox,
+  port: number,
+  options: { onOutput?: (text: string) => void; probePublic?: (url: string) => Promise<PublicProbe> } = {},
+): Promise<ReviveOutcome> {
+  const url = previewAddress(sandbox, port);
+  const record = (await readServerRegistry(sandbox)).find((r) => r.port === port);
+  if (!record) {
+    return { attempted: false, ready: false, previewUrl: url, port, command: null, logs: '', reason: null };
+  }
+
+  const started = await startServer(sandbox, record.command, port, {
+    cwd: record.cwd || SANDBOX_PROJECT_DIR,
+    onOutput: options.onOutput,
+    probePublic: options.probePublic,
+  });
+
+  return {
+    attempted: true,
+    ready: started.ready,
+    previewUrl: started.previewUrl,
+    port,
+    command: started.command,
+    logs: started.logs,
+    reason: started.reason,
+  };
 }
 
 export async function stopServer(sandbox: Sandbox, port: number): Promise<boolean> {
@@ -198,6 +456,7 @@ export async function stopServer(sandbox: Sandbox, port: number): Promise<boolea
     `(which fuser >/dev/null 2>&1 && fuser -k ${port}/tcp 2>/dev/null) || (pkill -f "PORT=${port}" 2>/dev/null) || true`,
     { cwd: '/', timeoutMs: 20_000 },
   );
+  await forgetServer(sandbox, port);
   return killed;
 }
 
@@ -270,7 +529,7 @@ export const TOOL_DEFINITIONS = [
     function: {
       name: 'start_server',
       description:
-        'Jalankan dev/preview server secara background dan dapatkan URL preview publik. Contoh command: "npm run dev -- --host 0.0.0.0 --port 3000". Port default 3000.',
+        'Jalankan dev/preview server secara background dan dapatkan URL preview publik. Tool ini MEMVERIFIKASI sendiri apakah URL publik benar-benar melayani aplikasi; kalau belum, hasilnya berisi masalah + log. Server WAJIB listen di 0.0.0.0 (bukan 127.0.0.1), kalau tidak proxy E2B menjawab "Closed Port Error": Vite/Astro/Svelte/Remix → "--host 0.0.0.0", Next.js → "--hostname 0.0.0.0", Express/Node → app.listen(port, "0.0.0.0"). Contoh: "npm run dev -- --host 0.0.0.0 --port 3000". Port default 3000.',
       parameters: {
         type: 'object',
         properties: {
@@ -375,9 +634,19 @@ export async function executeTool(ctx: ToolContext, name: string, rawArgs: Recor
           output: [
             `preview_url: ${res.previewUrl}`,
             `cwd: ${relPath(cwd, SANDBOX_PROJECT_DIR) || '.'}`,
-            `status: ${res.ready ? 'server merespons HTTP' : 'server belum merespons dalam 30 detik'}`,
+            `command: ${res.command}${res.rebound ? '  (dijalankan ulang dengan bind 0.0.0.0)' : ''}`,
+            `http_lokal: ${res.localCode}  |  bind: ${res.listenScope}  |  url_publik: ${res.publicStatus}`,
+            `status: ${
+              res.ready
+                ? 'SIAP - URL publik sudah melayani aplikasi user'
+                : 'BELUM SIAP - jangan katakan preview siap ke user'
+            }`,
+            res.reason ? `masalah: ${res.reason}` : '',
+            res.warning ? `catatan: ${res.warning}` : '',
             res.logs ? `logs:\n${truncate(res.logs, 3_000)}` : 'logs: (kosong)',
-          ].join('\n'),
+          ]
+            .filter(Boolean)
+            .join('\n'),
           previewUrl: res.previewUrl,
           port,
         };
@@ -391,13 +660,24 @@ export async function executeTool(ctx: ToolContext, name: string, rawArgs: Recor
 
       case 'get_preview_url': {
         const port = clamp(Number(args.port) || 3000, 1024, 65535);
-        const probe = await runCommand(
-          ctx.sandbox,
-          `code=$(curl -s -o /dev/null -m 4 -w "%{http_code}" http://127.0.0.1:${port}/ 2>/dev/null || echo 000); echo "http_status: $code"`,
-          { cwd: '/', timeoutMs: 20_000 },
-        );
         const url = previewAddress(ctx.sandbox, port);
-        return { ok: true, output: `preview_url: ${url}\n${probe.stdout.trim()}`, previewUrl: url, port };
+        const local = await probeLocalPort(ctx.sandbox, port);
+        const publicProbe = await probePublicUrl(url);
+        const decision = decideServerReadiness({ localCode: local.code, listenScope: local.scope, publicProbe });
+        return {
+          ok: decision.ready,
+          output: [
+            `preview_url: ${url}`,
+            `http_lokal: ${local.code}  |  bind: ${local.scope}  |  url_publik: ${publicProbe.status}`,
+            `status: ${decision.ready ? 'SIAP dipakai user' : 'BELUM SIAP'}`,
+            decision.reason ? `masalah: ${decision.reason}` : '',
+            decision.warning ? `catatan: ${decision.warning}` : '',
+          ]
+            .filter(Boolean)
+            .join('\n'),
+          previewUrl: url,
+          port,
+        };
       }
 
       default:

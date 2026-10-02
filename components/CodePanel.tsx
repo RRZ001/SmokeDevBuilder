@@ -17,6 +17,12 @@ export type PreviewState = {
   online: boolean;
   loading: boolean;
   reason: string | null;
+  /** 'all' = bind 0.0.0.0, 'loopback' = hanya 127.0.0.1 (penyebab Closed Port Error). */
+  listenScope?: 'all' | 'loopback' | 'none' | 'unknown' | null;
+  /** true = perintah server baru saja dijalankan ulang otomatis. */
+  restarted?: boolean;
+  /** true = yang menjawab URL publik adalah halaman error proxy E2B. */
+  proxyError?: boolean;
 };
 
 type Props = {
@@ -41,6 +47,7 @@ type Props = {
   onRunCommand: (command: string) => void;
   preview: PreviewState;
   onRefreshPreview: () => void;
+  onRestartPreview: () => void;
   onSetPort: (port: number) => void;
   activeTab: Tab;
   onTabChange: (tab: Tab) => void;
@@ -188,7 +195,11 @@ export default function CodePanel(props: Props) {
           loading={props.preview.loading}
           canPreview={sandboxReady}
           reason={props.preview.reason}
+          listenScope={props.preview.listenScope ?? null}
+          restarted={Boolean(props.preview.restarted)}
+          proxyError={Boolean(props.preview.proxyError)}
           onRefresh={props.onRefreshPreview}
+          onRestart={props.onRestartPreview}
           onSetPort={props.onSetPort}
         />
       )}

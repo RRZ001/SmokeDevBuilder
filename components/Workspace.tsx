@@ -217,10 +217,28 @@ export default function Workspace() {
       }
       if (!silent) setPreview((p) => ({ ...p, loading: true }));
       try {
-        const data = await apiJson<{ url: string; port: number; status: string; online: boolean }>(
-          `/api/projects/${id}/sandbox/preview`,
-        );
-        setPreview((p) => ({ ...p, url: data.url, port: data.port, status: data.status, online: data.online, loading: false, reason: null }));
+        const data = await apiJson<{
+          url: string;
+          port: number;
+          status: string;
+          online: boolean;
+          listenScope?: PreviewState['listenScope'];
+          restarted?: boolean;
+          proxyError?: boolean;
+          reason?: string | null;
+        }>(`/api/projects/${id}/sandbox/preview`);
+        setPreview((p) => ({
+          ...p,
+          url: data.url,
+          port: data.port,
+          status: data.status,
+          online: data.online,
+          loading: false,
+          reason: data.reason ?? null,
+          listenScope: data.listenScope ?? null,
+          restarted: Boolean(data.restarted),
+          proxyError: Boolean(data.proxyError),
+        }));
       } catch (err) {
         setPreview((p) => ({
           ...p,
@@ -401,7 +419,17 @@ export default function Workspace() {
               // sebelum prosesnya benar-benar listen, dan menganggapnya online
               // membuat iframe menampilkan halaman error E2B ("Closed Port Error").
               // Set URL-nya saja, lalu biarkan pengecekan status yang menentukan.
-              setPreview((p) => ({ ...p, url: String(event.url), port, online: false, loading: true, reason: null }));
+              setPreview((p) => ({
+                ...p,
+                url: String(event.url),
+                port,
+                online: false,
+                loading: true,
+                reason: null,
+                listenScope: null,
+                restarted: false,
+                proxyError: false,
+              }));
               void apiJson(`/api/projects/${activeId}/sandbox/preview`, {
                 method: 'POST',
                 body: JSON.stringify({ port }),
@@ -645,6 +673,53 @@ export default function Workspace() {
     [activeId, refreshPreview],
   );
 
+  /**
+   * Jalankan ulang dev server di sandbox (perintah terakhir yang dipakai agent).
+   * Dipakai tombol "Jalankan ulang server" saat preview tidak merespons - mis.
+   * setelah sandbox bangun dari pause sehingga proses dev server-nya hilang.
+   */
+  const restartPreview = useCallback(async () => {
+    if (!activeId) return;
+    setPreview((p) => ({ ...p, loading: true }));
+    try {
+      const data = await apiJson<{
+        url: string;
+        port: number;
+        status: string;
+        online: boolean;
+        listenScope?: PreviewState['listenScope'];
+        restarted?: boolean;
+        proxyError?: boolean;
+        reason?: string | null;
+        startedCommand?: string | null;
+      }>(`/api/projects/${activeId}/sandbox/preview`, {
+        method: 'POST',
+        body: JSON.stringify({ action: 'restart', port: preview.port }),
+      });
+      setPreview((p) => ({
+        ...p,
+        url: data.url,
+        port: data.port,
+        status: data.status,
+        online: data.online,
+        loading: false,
+        reason: data.reason ?? null,
+        listenScope: data.listenScope ?? null,
+        restarted: Boolean(data.restarted),
+        proxyError: Boolean(data.proxyError),
+      }));
+      pushLine(
+        data.online ? 'info' : 'error',
+        data.online
+          ? `Dev server dijalankan ulang: ${data.startedCommand ?? '(perintah tersimpan)'}`
+          : `Gagal menjalankan ulang dev server.\n${data.reason ?? 'Tidak ada perintah server yang tersimpan — minta agent menjalankan start_server.'}`,
+      );
+    } catch (err) {
+      setPreview((p) => ({ ...p, loading: false }));
+      pushLine('error', `Gagal menjalankan ulang dev server: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, [activeId, preview.port, pushLine]);
+
   const storageLabel = useMemo(() => {
     const storage = capabilities.storage;
     if (!storage.supabaseConfigured) return capabilities.storageEphemeral ? 'Sementara' : 'SQLite';
@@ -780,6 +855,7 @@ export default function Workspace() {
             onRunCommand={runCommand}
             preview={preview}
             onRefreshPreview={() => void refreshPreview()}
+            onRestartPreview={() => void restartPreview()}
             onSetPort={setPreviewPort}
             activeTab={tab}
             onTabChange={setTab}

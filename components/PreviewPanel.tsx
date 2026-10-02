@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { ExternalIcon, RefreshIcon } from './icons';
 
 type Props = {
@@ -11,7 +11,12 @@ type Props = {
   loading: boolean;
   canPreview: boolean;
   reason?: string | null;
+  /** 'loopback' = server hanya listen di 127.0.0.1, penyebab Closed Port Error. */
+  listenScope?: 'all' | 'loopback' | 'none' | 'unknown' | null;
+  restarted?: boolean;
+  proxyError?: boolean;
   onRefresh: () => void;
+  onRestart: () => void;
   onSetPort: (port: number) => void;
 };
 
@@ -23,11 +28,24 @@ export default function PreviewPanel({
   loading,
   canPreview,
   reason,
+  listenScope,
+  restarted,
+  proxyError,
   onRefresh,
+  onRestart,
   onSetPort,
 }: Props) {
   const [portDraft, setPortDraft] = useState(String(port));
   const [nonce, setNonce] = useState(0);
+
+  useEffect(() => setPortDraft(String(port)), [port]);
+
+  const bindHint =
+    listenScope === 'loopback'
+      ? 'Server hanya mendengarkan di 127.0.0.1 (localhost) sehingga proxy E2B tidak bisa menjangkaunya. Bind ke 0.0.0.0: Vite/Astro/Svelte → "npm run dev -- --host 0.0.0.0", Next.js → "--hostname 0.0.0.0", Express/Node → app.listen(port, "0.0.0.0").'
+      : null;
+
+  const offlineText = reason ?? bindHint;
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -72,6 +90,15 @@ export default function PreviewPanel({
         >
           {loading ? 'Cek…' : 'Cek status'}
         </button>
+        <button
+          type="button"
+          onClick={onRestart}
+          disabled={!canPreview || loading}
+          title="Jalankan ulang perintah dev server terakhir di sandbox (mis. setelah sandbox bangun dari pause)"
+          className="h-7 rounded-md border border-white/10 px-2.5 text-[11.5px] text-ink-300 hover:text-white disabled:opacity-40"
+        >
+          Jalankan ulang server
+        </button>
         {url && (
           <a
             href={url}
@@ -83,6 +110,20 @@ export default function PreviewPanel({
           </a>
         )}
       </div>
+
+      {(restarted || proxyError) && (
+        <div
+          className={`border-b px-3 py-1.5 text-[11.5px] ${
+            proxyError
+              ? 'border-amber-300/20 bg-amber-300/[0.08] text-amber-200'
+              : 'border-white/[0.06] bg-white/[0.02] text-ink-300'
+          }`}
+        >
+          {proxyError
+            ? 'URL publik E2B menolak koneksi — aplikasi belum benar-benar jalan di sandbox (bukan masalah kode di UI ini).'
+            : 'Dev server dijalankan ulang otomatis.'}
+        </div>
+      )}
 
       <div className="relative flex-1 bg-ink-950">
         {url && online ? (
@@ -99,16 +140,14 @@ export default function PreviewPanel({
               {canPreview ? 'Server belum merespons di port ini.' : 'Preview belum tersedia.'}
             </p>
             <p className="max-w-md text-[12px] leading-relaxed text-ink-400">
-              {reason ??
+              {offlineText ??
                 (url
-                  ? 'Server belum merespons di port ini. Kalau agent baru saja menyiapkan proyek, tunggu sebentar — status dicek otomatis setiap 4 detik. Pastikan juga servernya bind ke 0.0.0.0 (mis. npm run dev -- --host 0.0.0.0 --port 3000).'
-                  : 'Jalankan dev server di sandbox, mis. lewat Terminal: npm run dev -- --host 0.0.0.0 --port 3000. Agent juga otomatis menjalankannya lewat tool start_server dan preview akan muncul di sini.')}
+                  ? 'Server belum merespons di port ini. Kalau agent baru saja menyiapkan proyek, tunggu sebentar — status dicek otomatis setiap 4 detik, dan dev server yang mati akan dicoba dijalankan ulang otomatis.'
+                  : 'Jalankan dev server di sandbox, mis. lewat tab Terminal: npm run dev -- --host 0.0.0.0 --port 3000. Agent juga menjalankannya otomatis lewat tool start_server.')}
             </p>
-            {url && (
-              <p className="text-[11.5px] text-ink-400">
-                {loading ? 'Memeriksa status server…' : 'Pemeriksaan otomatis aktif (tanpa perlu klik).'}
-              </p>
-            )}
+            <p className="text-[11.5px] text-ink-400">
+              {loading ? 'Memeriksa status server…' : 'Pemeriksaan otomatis aktif (tanpa perlu klik).'}
+            </p>
           </div>
         )}
       </div>

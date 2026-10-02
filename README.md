@@ -18,7 +18,8 @@ Stack: **Next.js 15 (App Router) + React 19 + Tailwind CSS + Supabase (fallback 
 | **Hemat biaya** | Sandbox idle **di-pause** (E2B tidak menagih saat paused) + auto-resume; prompt caching Claude via `cache_control`; `session_id` untuk menjaga cache tetap hangat; isi file lama tidak dikirim ulang ke model; batas token keluaran; **pemakaian token & biaya tiap giliran ditampilkan di UI**. |
 | **Retry otomatis** | Error sementara dari OpenRouter (429/5xx) dicoba ulang otomatis 3× dengan menghormati `Retry-After`; statusnya terlihat live di panel chat. |
 | **Reasoning** | Delta `reasoning`/`reasoning_content` OpenRouter (DeepSeek-R1 dll) dirender sebagai blok "Proses berpikir model" yang bisa dilipat. |
-| **Live preview** | iframe ke `https://<port>-<sandbox-id>.e2b.dev`, plus tombol cek status HTTP dan ganti port. |
+| **Live preview** | iframe ke `https://<port>-<sandbox-id>.e2b.dev`, plus tombol cek status HTTP, ganti port, dan **jalankan ulang server**. Kesiapan server dinilai dari URL publik (bukan `curl` di dalam sandbox), jadi "Closed Port Error" tidak lagi lolos sebagai "siap". |
+| **Preview sembuh sendiri** | Perintah dev server yang berhasil dicatat di dalam sandbox; kalau prosesnya hilang (sandbox bangun dari pause/cold-boot), preview **menjalankan ulang servernya otomatis** — dan kalau servernya cuma bind ke `127.0.0.1`, perintah diulang otomatis dengan flag bind `0.0.0.0` sesuai framework (`--host` / `--hostname`, terdeteksi dari `package.json`). |
 | **Editor** | File tree sandbox + penampil kode dengan syntax highlighting; kamu juga bisa mengedit dan menyimpan kembali ke sandbox. |
 | **Terminal manual** | Terminal di panel kode untuk menjalankan perintah sendiri di sandbox (output di-stream realtime). |
 | **Persistence** | Riwayat chat (termasuk kartu tool call + outputnya), daftar proyek, dan konfigurasi disimpan ke **Supabase**; kalau Supabase belum diisi atau sedang tidak bisa diakses, otomatis **fallback ke SQLite** tanpa kehilangan fitur. |
@@ -298,7 +299,7 @@ Endpoint berguna untuk diagnosa: `GET /api/health` (runtime + driver storage), `
 | `/api/projects/:id/sandbox/exec` | POST | Jalankan perintah manual di sandbox (stream NDJSON). |
 | `/api/projects/:id/sandbox/files` | GET | Daftar file proyek (untuk file tree). |
 | `/api/projects/:id/sandbox/file` | GET / PUT | Baca (`?path=`) / simpan (`{path, content}`) satu file. |
-| `/api/projects/:id/sandbox/preview` | GET / POST | URL preview + status HTTP; POST untuk set port. |
+| `/api/projects/:id/sandbox/preview` | GET / POST | URL preview + status publik & lokal; GET juga memulihkan dev server yang mati. POST `{port}` = set port, POST `{action:"restart"}` = jalankan ulang server. |
 | `/api/health` | GET | Status runtime, kapabilitas, dan driver storage. |
 
 **Event NDJSON** dari `/api/chat`: `message`, `model`, `status`, `mode`, `sandbox`, `project`, `log`, `text`, `reasoning`, `tool_start`, `tool_output`, `tool_result`, `preview`, `usage`, `error`, `saved`, `done`.
@@ -385,6 +386,8 @@ Biarkan default: `npm run build` saat `NODE_ENV=production` memberi basePath `/a
 | --- | --- |
 | Chat menjawab *"OpenRouter API key belum diisi"* | Isi `OPENROUTER_API_KEY` di environment atau lewat modal Settings. |
 | Badge panel kode menulis *"Sandbox nonaktif (E2B_API_KEY)"* / agent hanya berdiskusi | `E2B_API_KEY` belum diisi. Pasang sebagai variabel environment di hosting, lalu jalankan ulang aplikasi (modal Settings hanya menampilkan status), lalu klik **Mulai sandbox**. |
+| Preview menampilkan *"Server belum merespons di port ini"* / *"Closed Port Error"* | Server dev tidak listen untuk proxy E2B. Aplikasi sudah otomatis menjalankan ulang perintah server terakhir dan menambal bind `0.0.0.0` bila frameworknya dikenali. Kalau masih gagal, klik **Jalankan ulang server** atau minta agent memperbaiki: Vite/Astro → `npm run dev -- --host 0.0.0.0`, Next.js → `npm run dev -- --hostname 0.0.0.0`, Express/Node → `app.listen(port, "0.0.0.0")`. |
+| Preview kosong setelah ditinggal lama (sandbox di-pause) | Normal: saat sandbox bangun, proses dev server bisa hilang. Buka tab Preview — server dijalankan ulang otomatis dari catatan perintah terakhir; tombol **Jalankan ulang server** memaksa bila perlu. |
 | *"OpenRouter menolak API key (401)"* di chat | Key salah/terhapus. Klik **Tes koneksi** di Settings. |
 | *"Kredit OpenRouter tidak cukup (402)"* | Isi saldo di <https://openrouter.ai/credits>. |
 | *"OpenRouter menolak sementara (429) ... could not verify available credits ... retry shortly"* | Ini **bukan** tanda saldo habis, melainkan throttle sementara di sisi OpenRouter (`openrouter_admission_control`) yang bisa muncul saat permintaan datang bertubi-tubi. Aplikasi otomatis mencoba ulang 3× mengikuti header `Retry-After` (maks 30 detik total), dan status "mencoba lagi dalam N detik" muncul di panel chat. Kalau tetap gagal: tunggu ~1 menit lalu kirim ulang pesan — pekerjaan di sandbox tidak hilang. |
