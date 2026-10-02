@@ -11,7 +11,8 @@
     "build:root": "NEXT_PUBLIC_BASE_PATH= next build",
     "test:files": "npx --yes tsx@4 tests/project-files.mts",
     "test:files-fallback": "npx --yes tsx@4 tests/files-missing-table.mts",
-    "test:preview": "npx --yes tsx@4 tests/preview-recovery.mts"
+    "test:preview": "npx --yes tsx@4 tests/preview-recovery.mts",
+    "test:prompt": "npx --yes tsx@4 tests/prompt-design.mts"
   },
   "dependencies": {
     "@e2b/code-interpreter": "2.8.0",

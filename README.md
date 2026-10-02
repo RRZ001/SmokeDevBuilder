@@ -20,6 +20,7 @@ Stack: **Next.js 15 (App Router) + React 19 + Tailwind CSS + Supabase (fallback 
 | **Reasoning** | Delta `reasoning`/`reasoning_content` OpenRouter (DeepSeek-R1 dll) dirender sebagai blok "Proses berpikir model" yang bisa dilipat. |
 | **Live preview** | iframe ke `https://<port>-<sandbox-id>.e2b.dev`, plus tombol cek status HTTP, ganti port, dan **jalankan ulang server**. Kesiapan server dinilai dari URL publik (bukan `curl` di dalam sandbox), jadi "Closed Port Error" tidak lagi lolos sebagai "siap". |
 | **Preview sembuh sendiri** | Perintah dev server yang berhasil dicatat di dalam sandbox; kalau prosesnya hilang (sandbox bangun dari pause/cold-boot), preview **menjalankan ulang servernya otomatis** — dan kalau servernya cuma bind ke `127.0.0.1`, perintah diulang otomatis dengan flag bind `0.0.0.0` sesuai framework (`--host` / `--hostname`, terdeteksi dari `package.json`). |
+| **Desain default menarik** | System prompt memuat panduan desain konkret (gradient indigo→violet→fuchsia, tipografi berani, ilustrasi SVG/CSS, animasi halus, jarak & `gap` yang tegas, uji 375px) sehingga app yang di-generate tidak tampil polos/template — dan panduan itu mengalah bila kamu menyebut gaya/brand sendiri. |
 | **Editor** | File tree sandbox + penampil kode dengan syntax highlighting; kamu juga bisa mengedit dan menyimpan kembali ke sandbox. |
 | **Terminal manual** | Terminal di panel kode untuk menjalankan perintah sendiri di sandbox (output di-stream realtime). |
 | **Persistence** | Riwayat chat (termasuk kartu tool call + outputnya), daftar proyek, dan konfigurasi disimpan ke **Supabase**; kalau Supabase belum diisi atau sedang tidak bisa diakses, otomatis **fallback ke SQLite** tanpa kehilangan fitur. |
@@ -109,9 +110,11 @@ agentcloud/
 │   │   ├── loop.ts              # ★ agentic loop + auto-debug + budget langkah
 │   │   ├── openrouter.ts        # klien streaming chat/completions + pemetaan error
 │   │   ├── history.ts           # rekonstruksi riwayat model dari blok UI
+│   │   ├── design.ts            # panduan desain UI (versi lengkap + ringkas)
 │   │   └── prompt.ts            # system prompt (mode agent & mode diskusi)
 │   ├── sandbox/
 │   │   ├── manager.ts           # create/connect/kill sandbox + pemasangan Node.js
+│   │   ├── preview-status.ts    # penilaian kesiapan preview (URL publik, bind 0.0.0.0)
 │   │   └── tools.ts             # definisi 7 tool + eksekutor + pengaman perintah
 │   ├── db/
 │   │   ├── index.ts             # pemilih driver + fallback otomatis (Proxy)
