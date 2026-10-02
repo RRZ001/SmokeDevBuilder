@@ -107,8 +107,11 @@ export default function CodePanel(props: Props) {
               )}
             </>
           ) : (
-            <span className="rounded-lg border border-amber-300/30 bg-amber-300/10 px-2.5 py-1 text-[11px] text-amber-300">
-              Isi E2B_API_KEY di Settings
+            <span
+              title="E2B_API_KEY belum diisi di environment aplikasi ini. Key ini hanya bisa dipasang sebagai variabel environment di hosting (bukan dari modal Settings)."
+              className="rounded-lg border border-amber-300/30 bg-amber-300/10 px-2.5 py-1 text-[11px] text-amber-300"
+            >
+              Sandbox nonaktif (E2B_API_KEY)
             </span>
           )}
         </span>
@@ -167,7 +170,11 @@ export default function CodePanel(props: Props) {
           lines={props.terminalLines}
           running={props.terminalRunning}
           disabled={!sandboxReady}
-          disabledReason={props.e2bReady ? 'Jalankan sandbox dulu (tombol "Mulai sandbox" di atas).' : 'E2B_API_KEY belum diisi.'}
+          disabledReason={
+            props.e2bReady
+              ? 'Jalankan sandbox dulu (tombol "Mulai sandbox" di atas).'
+              : 'E2B_API_KEY belum diisi di environment aplikasi ini, jadi terminal sandbox tidak tersedia.'
+          }
           onRun={props.onRunCommand}
         />
       )}

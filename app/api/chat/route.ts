@@ -98,7 +98,7 @@ export async function POST(request: Request) {
     if (!hasE2bKey()) {
       pushNotice(
         'warn',
-        'E2B_API_KEY belum diisi, jadi agent berjalan dalam mode diskusi (belum bisa mengeksekusi kode). Isi key E2B di Settings untuk mengaktifkan eksekusi penuh di cloud sandbox.',
+        'E2B_API_KEY belum diisi, jadi agent berjalan dalam mode diskusi (belum bisa mengeksekusi kode). Key E2B hanya bisa dipasang sebagai variabel environment saat aplikasi ini di-host (bukan di modal Settings, yang cuma menampilkan status). Kalau kamu pemilik aplikasinya: pasang E2B_API_KEY di environment hosting lalu jalankan ulang.',
       );
     } else {
       try {

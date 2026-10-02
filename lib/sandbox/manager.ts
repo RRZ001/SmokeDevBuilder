@@ -75,7 +75,7 @@ export function getE2bKey(): string {
   const key = E2B_API_KEY_ENV;
   if (!key) {
     throw new SandboxConfigError(
-      'E2B_API_KEY belum diisi. Tambahkan di environment (E2B_API_KEY=...) atau isi lewat Settings di aplikasi.',
+      'E2B_API_KEY belum diisi. Tambahkan E2B_API_KEY pada environment aplikasi (variabel environment hosting), lalu jalankan ulang aplikasinya.',
     );
   }
   return key;

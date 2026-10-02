@@ -95,7 +95,11 @@ export default function ChatPanel({
         <StatusPill
           tone={mode === 'agent' ? 'good' : 'warn'}
           label={mode === 'agent' ? 'Sandbox aktif' : 'Mode diskusi'}
-          title={mode === 'agent' ? `Sandbox: ${sandboxId ?? '-'}` : 'E2B_API_KEY belum diisi'}
+          title={
+            mode === 'agent'
+              ? `Sandbox: ${sandboxId ?? '-'}`
+              : 'E2B_API_KEY belum diisi di environment aplikasi ini — sandbox tidak aktif, jadi agent menulis kode tanpa menjalankannya.'
+          }
         />
         <StatusPill tone="neutral" label={storageLabel} title="Penyimpanan riwayat chat & proyek" />
         {(sessionUsage.promptTokens > 0 || sessionUsage.completionTokens > 0) && (

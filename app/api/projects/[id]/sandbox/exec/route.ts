@@ -24,7 +24,7 @@ export async function POST(request: Request, ctx: Ctx) {
   const command = (body.command || '').trim();
 
   if (!command) return fail('Parameter `command` wajib diisi.', 400);
-  if (!hasE2bKey()) return fail('E2B_API_KEY belum diisi - terminal sandbox tidak tersedia.', 400);
+  if (!hasE2bKey()) return fail('E2B_API_KEY belum diisi di environment aplikasi ini - terminal sandbox tidak tersedia.', 400);
 
   const { store } = await getStore();
   const project = await store.getProject(ownerId, id);

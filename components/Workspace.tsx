@@ -211,7 +211,7 @@ export default function Workspace() {
           loading: false,
           online: false,
           status: '000',
-          reason: 'Isi E2B_API_KEY di Settings untuk mengaktifkan cloud sandbox & preview.',
+          reason: 'E2B_API_KEY belum diisi di environment aplikasi ini, jadi cloud sandbox & live preview belum tersedia (key hanya bisa dipasang lewat variabel environment hosting, bukan dari Settings).',
         }));
         return;
       }

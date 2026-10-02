@@ -193,7 +193,7 @@ Kalau Supabase tidak bisa dihubungi (URL salah, key salah, atau kuota habis), ap
 ## 7. Setup E2B (Cloud Sandbox)
 
 1. Daftar di <https://e2b.dev>, lalu salin API key dari dashboard.
-2. Isi `E2B_API_KEY` di environment **atau** di modal Settings (untuk kenyamanan, environment lebih rapi karena tidak tersimpan di database).
+2. Isi `E2B_API_KEY` sebagai **variabel environment** saat aplikasi di-host (bukan lewat modal Settings — modal itu hanya menampilkan status). Nilainya tidak perlu ditulis di dalam kode.
 3. Sandbox default dibuat dengan masa hidup 10 menit dan otomatis diperpanjang setiap kali dipakai; kalau sudah kedaluwarsa, aplikasi otomatis membuat sandbox baru (riwayat chat tetap utuh).
 
 ### (Opsional) Template kustom agar sandbox langsung siap
@@ -384,7 +384,7 @@ Biarkan default: `npm run build` saat `NODE_ENV=production` memberi basePath `/a
 | Gejala | Penyebab & solusi |
 | --- | --- |
 | Chat menjawab *"OpenRouter API key belum diisi"* | Isi `OPENROUTER_API_KEY` di environment atau lewat modal Settings. |
-| Badge panel kode menulis *"sandbox mati"* / agent hanya berdiskusi | `E2B_API_KEY` belum diisi. Isi, lalu klik **Mulai sandbox**. |
+| Badge panel kode menulis *"Sandbox nonaktif (E2B_API_KEY)"* / agent hanya berdiskusi | `E2B_API_KEY` belum diisi. Pasang sebagai variabel environment di hosting, lalu jalankan ulang aplikasi (modal Settings hanya menampilkan status), lalu klik **Mulai sandbox**. |
 | *"OpenRouter menolak API key (401)"* di chat | Key salah/terhapus. Klik **Tes koneksi** di Settings. |
 | *"Kredit OpenRouter tidak cukup (402)"* | Isi saldo di <https://openrouter.ai/credits>. |
 | *"OpenRouter menolak sementara (429) ... could not verify available credits ... retry shortly"* | Ini **bukan** tanda saldo habis, melainkan throttle sementara di sisi OpenRouter (`openrouter_admission_control`) yang bisa muncul saat permintaan datang bertubi-tubi. Aplikasi otomatis mencoba ulang 3× mengikuti header `Retry-After` (maks 30 detik total), dan status "mencoba lagi dalam N detik" muncul di panel chat. Kalau tetap gagal: tunggu ~1 menit lalu kirim ulang pesan — pekerjaan di sandbox tidak hilang. |

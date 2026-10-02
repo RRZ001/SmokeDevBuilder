@@ -324,7 +324,11 @@ export default function SettingsModal({ open, onClose, settings, capabilities, o
               title="Cloud sandbox"
               ok={e2bReady}
               value={e2bReady ? 'E2B siap' : 'Belum aktif'}
-              hint={e2bReady ? `Direktori: ${capabilities.sandboxDir}` : 'Isi E2B_API_KEY di environment hosting'}
+              hint={
+                e2bReady
+                  ? `Direktori: ${capabilities.sandboxDir}`
+                  : 'Belum aktif: E2B_API_KEY hanya bisa dipasang sebagai variabel environment saat aplikasi di-host, lalu aplikasi dijalankan ulang (tidak ada kolom untuk mengisinya di sini).'
+              }
             />
             <StatusCard
               title="OpenRouter"

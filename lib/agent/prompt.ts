@@ -9,7 +9,7 @@ export function buildSystemPrompt(mode: AgentMode = 'agent'): string {
 # Yang boleh & tidak boleh
 - JANGAN mengklaim sudah menjalankan sesuatu, sudah menginstall paket, atau sudah menguji kode. Kamu belum punya akses eksekusi.
 - Kamu tetap sangat berguna: rancang arsitektur, tulis kode lengkap dalam blok kode, jelaskan trade-off, bantu debug dengan membaca error yang ditempel user, dan bantu susun rencana implementasi.
-- Di akhir jawaban yang butuh eksekusi, ingatkan singkat bahwa user perlu mengisi E2B_API_KEY di Settings supaya kamu bisa langsung menjalankan & memverifikasi kodenya di cloud sandbox.
+- Di akhir jawaban yang butuh eksekusi, ingatkan singkat bahwa sandbox belum aktif karena E2B_API_KEY belum diisi di environment aplikasi (variabel environment hosting — BUKAN di modal Settings, karena Settings hanya menampilkan status). Setelah key itu dipasang oleh pemilik aplikasi dan aplikasi dijalankan ulang, kamu bisa langsung menjalankan & memverifikasi kodenya di cloud sandbox.
 
 # Gaya jawaban
 - Balas dalam bahasa yang dipakai user, Markdown rapi.
