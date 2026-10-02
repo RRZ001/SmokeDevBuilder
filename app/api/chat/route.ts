@@ -1,0 +1,187 @@
+import type { Sandbox } from '@e2b/code-interpreter';
+import { ndjsonStream, readJson } from '@/lib/api';
+import { buildHistory } from '@/lib/agent/history';
+import { runAgent, type AgentEvent } from '@/lib/agent/loop';
+import type { AgentMode } from '@/lib/agent/prompt';
+import { capabilities } from '@/lib/config';
+import { getStore } from '@/lib/db';
+import { restoreProjectFiles, snapshotProjectFiles, summarizeSnapshot } from '@/lib/project-files';
+import type { Block } from '@/lib/db/types';
+import { ensureRuntime, getSandbox, hasE2bKey } from '@/lib/sandbox/manager';
+import { effectiveApiKey, effectiveModel, owner } from '@/lib/session';
+
+export const dynamic = 'force-dynamic';
+// Catatan durasi: batas waktu fungsi diatur oleh platform hosting, bukan di sini.
+// (Vercel mengabaikan nilai melebihi batas plan-nya; atur lewat `vercel.json`
+// -> {"functions": {"<path>": {"maxDuration": 60}}} sesuai plan kamu.)
+
+type Body = { projectId?: string; message?: string; autoDebug?: boolean };
+
+/**
+ * Endpoint utama agent - mengembalikan stream NDJSON berisi event:
+ * message | model | status | text | reasoning | tool_start | tool_output |
+ * tool_result | preview | usage | error | saved | done
+ */
+export async function POST(request: Request) {
+  const ownerId = await owner();
+  const body = await readJson<Body>(request);
+  const projectId = (body.projectId || '').trim();
+  const userText = (body.message || '').trim();
+  const autoDebug = body.autoDebug !== false;
+
+  if (!projectId || !userText) {
+    return Response.json({ error: 'projectId dan message wajib diisi.' }, { status: 400 });
+  }
+
+  const { store, info } = await getStore();
+  const project = await store.getProject(ownerId, projectId);
+  if (!project) {
+    // Penjelasan yang berguna: di hosting serverless, data lokal (SQLite) tidak
+    // bertahan sehingga proyek dari request sebelumnya bisa "hilang".
+    const ephemeral = capabilities(info.active).storageEphemeral;
+    const message = ephemeral
+      ? 'Proyek tidak ditemukan. Hosting ini (serverless) belum tersambung ke database permanen, jadi proyek & riwayat chat bisa hilang antar-request. Hubungkan Supabase lalu muat ulang halaman.'
+      : 'Proyek tidak ditemukan (mungkin sudah dihapus). Muat ulang halaman untuk menyegarkan daftar proyek.';
+    return Response.json({ error: message }, { status: 404 });
+  }
+
+  const settings = await store.getSettings(ownerId);
+  const apiKey = effectiveApiKey(settings);
+  const model = effectiveModel(settings);
+
+  // Riwayat diambil SEBELUM menyimpan pesan user supaya tidak duplikat.
+  const history = buildHistory(await store.listMessages(ownerId, projectId));
+  const userMessage = await store.addMessage({
+    project_id: projectId,
+    owner_id: ownerId,
+    role: 'user',
+    content: userText,
+  });
+
+  return ndjsonStream(async (send, signal) => {
+    send({ type: 'message', message: userMessage });
+    send({ type: 'model', model });
+
+    if (!apiKey) {
+      const message =
+        'OpenRouter API key belum diisi. Buka Settings (ikon gerigi di kanan atas) lalu tempelkan API key dari openrouter.ai/keys.';
+      send({ type: 'error', message });
+      const blocks: Block[] = [{ type: 'notice', level: 'error', text: message }];
+      const saved = await store.addMessage({
+        project_id: projectId,
+        owner_id: ownerId,
+        role: 'assistant',
+        content: message,
+        parts: blocks,
+      });
+      send({ type: 'saved', message: saved });
+      send({ type: 'done', blocks, content: message });
+      return;
+    }
+
+    let mode: AgentMode = 'chat';
+    let sandboxId = project.sandbox_id;
+    let toolCtx: { sandbox: Sandbox; sandboxId: string } | null = null;
+
+    // Blok pesan assistant. Dideklarasikan SEBELUM cabang E2B di bawah karena
+    // notice dari cabang itu ikut disimpan ke riwayat (kalau dideklarasikan
+    // setelahnya, `blocks` belum terinisialisasi → ReferenceError/TDZ).
+    const blocks: Block[] = [];
+    let finalText = '';
+
+    /** Tambahkan notice ke pesan (tampil live DAN tersimpan di riwayat). */
+    const pushNotice = (level: 'info' | 'warn' | 'error', message: string) => {
+      blocks.push({ type: 'notice', level, text: message });
+      send({ type: 'notice', level, message });
+    };
+
+    if (!hasE2bKey()) {
+      pushNotice(
+        'warn',
+        'E2B_API_KEY belum diisi, jadi agent berjalan dalam mode diskusi (belum bisa mengeksekusi kode). Isi key E2B di Settings untuk mengaktifkan eksekusi penuh di cloud sandbox.',
+      );
+    } else {
+      try {
+        send({ type: 'status', message: 'Menyiapkan cloud sandbox E2B…' });
+        const handle = await getSandbox(sandboxId, { create: true });
+        sandboxId = handle.sandboxId;
+        if (handle.recovered) {
+          // Sandbox lama sudah dihapus E2B: file proyek sebelumnya tidak bisa
+          // dipulihkan. Beri tahu apa adanya supaya user tidak menebak-nebak.
+          pushNotice(
+            'warn',
+            'Sandbox lama sudah dihapus oleh E2B, jadi file proyek sebelumnya tidak bisa dipulihkan. Sandbox baru sudah dibuat — minta agent membangun ulang proyeknya. Ke depannya sandbox tidak akan dihapus saat idle: ia otomatis di-pause dan bangun sendiri saat dipakai.',
+          );
+        }
+        if (project.sandbox_id !== sandboxId) {
+          await store.updateProject(ownerId, projectId, { sandbox_id: sandboxId });
+          send({ type: 'project', project: { ...project, sandbox_id: sandboxId } });
+        }
+        send({ type: 'sandbox', sandboxId, status: 'ready' });
+
+        send({ type: 'status', message: 'Memastikan Node.js & npm tersedia di sandbox…' });
+        const runtimeLog = await ensureRuntime(handle.sandbox);
+        if (runtimeLog) send({ type: 'log', value: runtimeLog });
+
+        // Sandbox baru/bersih: pulihkan file proyek dari database supaya user
+        // tidak perlu membangun ulang dari nol (dan tidak membakar token lagi).
+        if (handle.created || handle.recovered) {
+          send({ type: 'status', message: 'Memulihkan file proyek dari database…' });
+          const restore = await restoreProjectFiles(store, ownerId, projectId, handle.sandbox);
+          if (restore.error) {
+            pushNotice('warn', restore.error);
+          } else if (restore.restored > 0) {
+            send({
+              type: 'log',
+              value: `Dipulihkan ${restore.restored} file proyek (${restore.total} tersimpan di database).`,
+            });
+            pushNotice(
+              'info',
+              `File proyek dipulihkan (${restore.restored} dari ${restore.total} file) ke sandbox baru. ` +
+                'Dependency (node_modules) tidak ikut tersimpan, jadi jalankan `npm install` dulu sebelum menjalankan server — ' +
+                'minta saja: "npm install lalu jalankan server".',
+            );
+          }
+        }
+
+        toolCtx = { sandbox: handle.sandbox, sandboxId };
+        mode = 'agent';
+      } catch (err) {
+        const message = `Sandbox E2B tidak bisa disiapkan: ${err instanceof Error ? err.message : String(err)}`;
+        pushNotice('warn', `${message} Agent lanjut dalam mode diskusi.`);
+        mode = 'chat';
+      }
+    }
+
+    send({ type: 'mode', mode });
+
+    const generator = runAgent({ apiKey, model, history, userText, toolCtx, autoDebug, signal, mode, sessionId: projectId });
+    for await (const event of generator as AsyncGenerator<AgentEvent>) {
+      if (event.type === 'done') {
+        blocks.push(...event.blocks);
+        finalText = event.content;
+      }
+      send(event);
+    }
+
+    const saved = await store.addMessage({
+      project_id: projectId,
+      owner_id: ownerId,
+      role: 'assistant',
+      content: finalText,
+      parts: blocks,
+    });
+    send({ type: 'saved', message: saved });
+
+    // Simpan file proyek ke database setelah giliran selesai: inilah yang membuat
+    // pekerjaan bertahan walau sandbox nanti hilang.
+    if (toolCtx) {
+      const snapshot = await snapshotProjectFiles(store, ownerId, projectId, toolCtx.sandbox);
+      const summary = summarizeSnapshot(snapshot);
+      if (summary) {
+        if (snapshot.error) pushNotice('warn', summary);
+        else send({ type: 'log', value: summary });
+      }
+    }
+  }, request.signal);
+}
