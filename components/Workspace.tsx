@@ -437,6 +437,17 @@ export default function Workspace() {
               void refreshPreviewRef.current?.(activeId, true);
               break;
             }
+            case 'choices': {
+              // Blok pilihan: tombol yang bisa langsung diklik user.
+              // Karena ini bagian dari jawaban model pada giliran yang sama,
+              // blok ini ikut tersimpan (route mengirimnya lewat event 'done').
+              const questions = Array.isArray(event.questions) ? event.questions : [];
+              if (questions.length) {
+                blocks.push({ type: 'choices', questions } as UiBlock);
+                flush();
+              }
+              break;
+            }
             case 'usage': {
               // Pemakaian token per langkah: diperbarui di blok usage (satu per giliran).
               const value = event.value as { promptTokens?: number; completionTokens?: number; cachedTokens?: number; costUsd?: number };

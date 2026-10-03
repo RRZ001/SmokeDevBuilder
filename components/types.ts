@@ -1,11 +1,12 @@
 'use client';
 
-import type { Block, NoticeBlock, ReasoningBlock, TextBlock, ToolBlock, UsageBlock } from '@/lib/db/types';
+import type { Block, ChoicesBlock, NoticeBlock, ReasoningBlock, TextBlock, ToolBlock, UsageBlock } from '@/lib/db/types';
 
 /** ToolBlock versi UI: menyimpan output yang sedang di-stream secara live. */
 export type UiToolBlock = ToolBlock & { liveOutput?: string };
 export type UiUsageBlock = UsageBlock;
-export type UiBlock = TextBlock | ReasoningBlock | NoticeBlock | UiUsageBlock | UiToolBlock;
+export type UiChoicesBlock = ChoicesBlock;
+export type UiBlock = TextBlock | ReasoningBlock | NoticeBlock | UiUsageBlock | UiToolBlock | UiChoicesBlock;
 
 export type UiMessage = {
   id: string;

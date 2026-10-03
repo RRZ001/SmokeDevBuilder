@@ -1,9 +1,10 @@
 'use client';
 
 import { useState } from 'react';
+import { matchChosenOption } from '@/lib/choice-select';
 import Markdown from './Markdown';
 import { BrainIcon, CheckIcon, ChevronIcon, DotIcon, ExternalIcon, TerminalIcon, WarnIcon } from './icons';
-import type { UiBlock, UiMessage, UiToolBlock } from './types';
+import type { UiBlock, UiChoicesBlock, UiMessage, UiToolBlock } from './types';
 
 const TOOL_LABEL: Record<string, string> = {
   run_command: 'Terminal',
@@ -30,7 +31,17 @@ function fmtTime(iso?: string): string {
   return d.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
 }
 
-export default function MessageItem({ message }: { message: UiMessage }) {
+export default function MessageItem({
+  message,
+  onChoose,
+  nextUserText,
+}: {
+  message: UiMessage;
+  /** Dipanggil saat user mengklik salah satu opsi (mengirimnya sebagai pesan). */
+  onChoose?: (text: string) => void;
+  /** Pesan user berikutnya - dipakai menandai pilihan yang sudah dijawab. */
+  nextUserText?: string | null;
+}) {
   const isUser = message.role === 'user';
   return (
     <article className={`animate-fade-up ${isUser ? 'flex justify-end' : ''}`}>
@@ -46,7 +57,12 @@ export default function MessageItem({ message }: { message: UiMessage }) {
           </div>
           <div className="min-w-0 flex-1 space-y-2.5">
             {message.blocks.map((block, index) => (
-              <BlockView key={`${message.id}-${index}`} block={block} />
+              <BlockView
+                key={`${message.id}-${index}`}
+                block={block}
+                onChoose={onChoose}
+                nextUserText={nextUserText}
+              />
             ))}
             <div className="text-[10.5px] text-muted/70">{fmtTime(message.created_at)}</div>
           </div>
@@ -56,14 +72,87 @@ export default function MessageItem({ message }: { message: UiMessage }) {
   );
 }
 
-function BlockView({ block }: { block: UiBlock }) {
+function BlockView({
+  block,
+  onChoose,
+  nextUserText,
+}: {
+  block: UiBlock;
+  onChoose?: (text: string) => void;
+  nextUserText?: string | null;
+}) {
   if (block.type === 'text') {
     return block.text.trim() ? <Markdown>{block.text}</Markdown> : null;
   }
   if (block.type === 'reasoning') return <ReasoningView text={block.text} />;
   if (block.type === 'notice') return <NoticeView level={block.level} text={block.text} />;
   if (block.type === 'usage') return <UsageView block={block} />;
+  if (block.type === 'choices') {
+    return <ChoicesView block={block} onChoose={onChoose} nextUserText={nextUserText} />;
+  }
   return <ToolView block={block} />;
+}
+
+/**
+ * Pertanyaan pilihan yang bisa diklik. Setelah salah satu opsi dikirim (pesan
+ * user berikutnya sama dengan opsinya), tombol dinonaktifkan dan pilihan itu
+ * ditandai — status ini diturunkan dari riwayat, jadi tidak perlu menulis ulang
+ * blok di database.
+ */
+function ChoicesView({
+  block,
+  onChoose,
+  nextUserText,
+}: {
+  block: UiChoicesBlock;
+  onChoose?: (text: string) => void;
+  nextUserText?: string | null;
+}) {
+  const chosen = matchChosenOption(nextUserText ?? '', block.questions);
+  const [pending, setPending] = useState<string | null>(null);
+  const answered = chosen ?? pending;
+
+  const pick = (option: string) => {
+    if (answered || !onChoose) return;
+    setPending(option);
+    onChoose(option);
+  };
+
+  return (
+    <div className="space-y-3 rounded-xl border border-accent-500/20 bg-accent-50/60 px-3 py-2.5">
+      {block.questions.map((question) => (
+        <div key={question.question} className="space-y-1.5">
+          <p className="text-[12.5px] font-semibold text-[#1F1B3A]">{question.question}</p>
+          <div className="flex flex-wrap gap-2">
+            {question.options.map((option) => {
+              const isPicked = answered === option;
+              return (
+                <button
+                  key={option}
+                  type="button"
+                  disabled={Boolean(answered) || !onChoose}
+                  onClick={() => pick(option)}
+                  title={isPicked ? 'Sudah kamu pilih' : 'Klik untuk mengirim pilihan ini'}
+                  className={`rounded-full border px-3 py-1.5 text-left text-[12px] font-medium transition ${
+                    isPicked
+                      ? 'border-accent-500 bg-gradient-to-br from-accent-500 to-accent-700 text-white shadow-soft'
+                      : answered
+                        ? 'border-black/[0.06] bg-white/50 text-muted/60'
+                        : 'border-accent-300/70 bg-white text-accent-700 hover:border-accent-500 hover:bg-accent-50'
+                  } disabled:cursor-default`}
+                >
+                  {option}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+      <p className="text-[11px] text-muted/80">
+        {answered ? 'Pilihan terkirim — agent melanjutkan dengan opsi ini.' : 'Atau tulis jawabanmu sendiri di kolom chat.'}
+      </p>
+    </div>
+  );
 }
 
 /** Baris kecil pemakaian token & biaya - supaya pemakaian model terlihat jelas. */

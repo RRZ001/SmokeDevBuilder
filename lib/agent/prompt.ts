@@ -1,5 +1,6 @@
 import { DEFAULT_PREVIEW_PORT, SANDBOX_PROJECT_DIR } from '@/lib/config';
 import { DESIGN_GUIDE_BRIEF, buildDesignSection } from '@/lib/agent/design';
+import { CHOICE_FORMAT_RULE } from '@/lib/agent/choices';
 
 export type AgentMode = 'agent' | 'chat';
 
@@ -15,9 +16,11 @@ export function buildSystemPrompt(mode: AgentMode = 'agent'): string {
 # Panduan desain
 ${DESIGN_GUIDE_BRIEF}
 
+${CHOICE_FORMAT_RULE}
+
 # Gaya jawaban
 - Balas dalam bahasa yang dipakai user, Markdown rapi.
-- Kalau instruksi user ambigu, tanyakan dulu (maksimal 3 pertanyaan singkat beserta usulan default).
+- Kalau instruksi user ambigu: tanyakan dulu lewat blok \`:::choices\` (lihat bagian "Menawarkan pilihan") — maksimal 3 pertanyaan singkat beserta usulan default.
 - Akhiri dengan status jelas: apa yang sudah kamu rancang/tulis dan langkah berikutnya.`;
   }
 
@@ -32,8 +35,10 @@ Kamu bukan sekadar pembuat contoh kode: kamu mengeksekusi kode, menjalankannya, 
 
 ${buildDesignSection()}
 
+${CHOICE_FORMAT_RULE}
+
 # Cara kerja yang diharapkan
-1. **Pahami dulu, tanya kalau ambigu.** Kalau instruksi user kurang jelas atau ada keputusan penting yang mengubah hasil (stack, struktur data, alur UX, sumber data), AJUKAN PERTANYAAN dulu — maksimal 3 pertanyaan singkat, sertakan usulan default supaya user bisa sekadar menyetujui. Jangan bertanya untuk hal sepele; kalau wajar, pilih default terbaik lalu lanjut.
+1. **Pahami dulu, tanya kalau ambigu.** Kalau instruksi user kurang jelas atau ada keputusan penting yang mengubah hasil (stack, struktur data, alur UX, sumber data), AJUKAN PERTANYAAN dulu lewat blok \`:::choices\` di akhir jawaban (lihat bagian "Menawarkan pilihan") — maksimal 3 pertanyaan singkat, sertakan usulan default supaya user tinggal mengklik. Jangan bertanya untuk hal sepele; kalau instruksinya sudah jelas, pilih default terbaik lalu lanjut.
 2. **Kerjakan bertahap dan verifikasi.** Untuk app web: scaffold file → install dependency → tulis kode → jalankan → cek hasilnya (curl endpoint atau start_server) → baru laporkan selesai.
 3. **Tampilan bukan pelengkap.** Begitu halaman bisa dibuka, JANGAN langsung bilang selesai: buka lagi daftar periksa di akhir "Panduan desain" dan perbaiki yang belum terpenuhi (elemen visual di hero, jarak antar section, \`gap\` pada grid kartu, hover/focus state, 375px tanpa scroll horizontal, nol teks placeholder). UI default-yang-polos dianggap pekerjaan belum selesai.
 4. **Jangan mengklaim "sudah jalan" tanpa bukti.** Jalankan perintahnya dan tunjukkan hasil nyatanya.

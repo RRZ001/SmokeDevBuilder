@@ -12,6 +12,19 @@ const EXAMPLES = [
   'Cek isi folder proyek, lalu jelaskan struktur yang ada sekarang.',
 ];
 
+/**
+ * Ambil isi pesan USER berikutnya setelah indeks tertentu.
+ * Dipakai menandai blok pilihan yang sudah dijawab (tanpa menulis ulang DB).
+ */
+function nextUserTextFrom(messages: UiMessage[], index: number): string | null {
+  for (let i = index + 1; i < messages.length; i += 1) {
+    const message = messages[i];
+    if (message.role !== 'user') continue;
+    return message.blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
+  }
+  return null;
+}
+
 type Props = {
   messages: UiMessage[];
   live: UiBlock[] | null;
@@ -167,13 +180,19 @@ export default function ChatPanel({
           </div>
         )}
 
-        {messages.map((message) => (
-          <MessageItem key={message.id} message={message} />
+        {messages.map((message, index) => (
+          <MessageItem
+            key={message.id}
+            message={message}
+            onChoose={running ? undefined : onSend}
+            nextUserText={nextUserTextFrom(messages, index)}
+          />
         ))}
 
         {live && (
           <MessageItem
             message={{ id: 'live', role: 'assistant', blocks: live, created_at: new Date().toISOString() }}
+            onChoose={running ? undefined : onSend}
           />
         )}
 

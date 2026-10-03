@@ -21,8 +21,12 @@ export type ToolBlock = {
   previewUrl?: string;
 };
 
+/** Pertanyaan pilihan yang bisa diklik user (lihat lib/agent/choices.ts). */
+export type ChoiceQuestion = { question: string; options: string[] };
+export type ChoicesBlock = { type: 'choices'; questions: ChoiceQuestion[] };
+
 /** Blok terurut - disimpan di kolom `parts` supaya UI bisa merender ulang chat lama. */
-export type Block = TextBlock | ReasoningBlock | NoticeBlock | UsageBlock | ToolBlock;
+export type Block = TextBlock | ReasoningBlock | NoticeBlock | UsageBlock | ToolBlock | ChoicesBlock;
 
 export type Project = {
   id: string;

@@ -21,6 +21,7 @@ Stack: **Next.js 15 (App Router) + React 19 + Tailwind CSS + Supabase (fallback 
 | **Live preview** | iframe ke `https://<port>-<sandbox-id>.e2b.dev`, plus tombol cek status HTTP, ganti port, dan **jalankan ulang server**. Kesiapan server dinilai dari URL publik (bukan `curl` di dalam sandbox), jadi "Closed Port Error" tidak lagi lolos sebagai "siap". |
 | **Preview sembuh sendiri** | Perintah dev server yang berhasil dicatat di dalam sandbox; kalau prosesnya hilang (sandbox bangun dari pause/cold-boot), preview **menjalankan ulang servernya otomatis** — dan kalau servernya cuma bind ke `127.0.0.1`, perintah diulang otomatis dengan flag bind `0.0.0.0` sesuai framework (`--host` / `--hostname`, terdeteksi dari `package.json`). |
 | **Desain default menarik** | System prompt memuat panduan desain konkret (gradient indigo→violet→fuchsia, tipografi berani, ilustrasi SVG/CSS, animasi halus, jarak & `gap` yang tegas, uji 375px) sehingga app yang di-generate tidak tampil polos/template — dan panduan itu mengalah bila kamu menyebut gaya/brand sendiri. |
+| **Pilihan yang bisa diklik** | Kalau instruksimu kurang detail, agent menawarkan 2–3 pertanyaan dengan opsi konkret sebagai **tombol** yang bisa langsung kamu klik (jawabannya otomatis terkirim sebagai pesan). Kalau permintaanmu sudah spesifik, agent langsung bekerja tanpa bertanya. Kamu tetap bisa mengetik jawaban sendiri. |
 | **Editor** | File tree sandbox + penampil kode dengan syntax highlighting; kamu juga bisa mengedit dan menyimpan kembali ke sandbox. |
 | **Terminal manual** | Terminal di panel kode untuk menjalankan perintah sendiri di sandbox (output di-stream realtime). |
 | **Persistence** | Riwayat chat (termasuk kartu tool call + outputnya), daftar proyek, dan konfigurasi disimpan ke **Supabase**; kalau Supabase belum diisi atau sedang tidak bisa diakses, otomatis **fallback ke SQLite** tanpa kehilangan fitur. |
@@ -111,6 +112,7 @@ agentcloud/
 │   │   ├── openrouter.ts        # klien streaming chat/completions + pemetaan error
 │   │   ├── history.ts           # rekonstruksi riwayat model dari blok UI
 │   │   ├── design.ts            # panduan desain UI (versi lengkap + ringkas)
+│   │   ├── choices.ts           # blok pilihan :::choices (parser + filter streaming)
 │   │   └── prompt.ts            # system prompt (mode agent & mode diskusi)
 │   ├── sandbox/
 │   │   ├── manager.ts           # create/connect/kill sandbox + pemasangan Node.js
@@ -305,7 +307,7 @@ Endpoint berguna untuk diagnosa: `GET /api/health` (runtime + driver storage), `
 | `/api/projects/:id/sandbox/preview` | GET / POST | URL preview + status publik & lokal; GET juga memulihkan dev server yang mati. POST `{port}` = set port, POST `{action:"restart"}` = jalankan ulang server. |
 | `/api/health` | GET | Status runtime, kapabilitas, dan driver storage. |
 
-**Event NDJSON** dari `/api/chat`: `message`, `model`, `status`, `mode`, `sandbox`, `project`, `log`, `text`, `reasoning`, `tool_start`, `tool_output`, `tool_result`, `preview`, `usage`, `error`, `saved`, `done`.
+**Event NDJSON** dari `/api/chat`: `message`, `model`, `status`, `mode`, `sandbox`, `project`, `log`, `text`, `reasoning`, `choices`, `tool_start`, `tool_output`, `tool_result`, `preview`, `usage`, `error`, `saved`, `done`.
 
 **Tool agent** (`lib/sandbox/tools.ts`): `run_command`, `write_file`, `read_file`, `list_files`, `start_server`, `stop_server`, `get_preview_url`.
 

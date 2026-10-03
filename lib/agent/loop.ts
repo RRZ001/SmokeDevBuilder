@@ -1,7 +1,8 @@
 import { MAX_AGENT_STEPS, MAX_AUTO_DEBUG_ROUNDS, MAX_OUTPUT_TOKENS, TOOL_OUTPUT_CHARS } from '@/lib/config';
-import type { Block, TextBlock, ToolBlock, UsageBlock } from '@/lib/db/types';
+import type { Block, ChoicesBlock, TextBlock, ToolBlock, UsageBlock } from '@/lib/db/types';
 import { truncate } from '@/lib/util';
 import { TOOL_DEFINITIONS, executeTool, type ToolContext, type ToolResult } from '@/lib/sandbox/tools';
+import { createChoiceStreamFilter, parseChoices } from './choices';
 import { autoDebugNudge, buildSystemPrompt, stepBudgetNotice, type AgentMode } from './prompt';
 import { OpenRouterError, streamChat, type ChatMsg, type UsageInfo } from './openrouter';
 
@@ -10,6 +11,7 @@ export type AgentEvent =
   | { type: 'retry'; attempt: number; maxAttempts: number; waitMs: number; reason: string }
   | { type: 'text'; value: string }
   | { type: 'reasoning'; value: string }
+  | { type: 'choices'; questions: import('@/lib/db/types').ChoiceQuestion[] }
   | { type: 'tool_start'; id: string; name: string; args: Record<string, unknown> }
   | { type: 'tool_output'; id: string; value: string }
   | { type: 'tool_result'; id: string; name: string; ok: boolean; output: string; previewUrl?: string }
@@ -72,6 +74,8 @@ export async function* runAgent(options: RunAgentOptions): AsyncGenerator<AgentE
       let reasoningBlock: { type: 'reasoning'; text: string } | null = null;
       let calls: Array<{ id: string; name: string; arguments: string }> = [];
       let finishReason: string | undefined;
+      // Menahan markup `:::choices` agar tidak berkedip di UI saat streaming.
+      const choiceFilter = createChoiceStreamFilter();
 
       // Akumulasi pemakaian token pada langkah ini (untuk ditampilkan ke user).
       const stepUsage: UsageInfo = { promptTokens: 0, completionTokens: 0, cachedTokens: 0, costUsd: undefined };
@@ -84,7 +88,9 @@ export async function* runAgent(options: RunAgentOptions): AsyncGenerator<AgentE
             blocks.push(textBlock);
           }
           textBlock.text += event.value;
-          yield { type: 'text', value: event.value };
+          // Yang dikirim ke UI adalah teks SETELAH blok pilihan dibuang.
+          const visible = choiceFilter.push(event.value);
+          if (visible) yield { type: 'text', value: visible };
         } else if (event.type === 'reasoning') {
           if (!reasoningBlock) {
             reasoningBlock = { type: 'reasoning', text: '' };
@@ -118,7 +124,22 @@ export async function* runAgent(options: RunAgentOptions): AsyncGenerator<AgentE
         turnUsage.costUsd = (turnUsage.costUsd ?? 0) + stepUsage.costUsd;
       }
 
-      if (textBuffer.trim()) finalText = finalText ? `${finalText}\n${textBuffer}` : textBuffer;
+      // Sisa teks yang masih ditahan filter (mis. blok pilihan tidak ditutup).
+      const tail = choiceFilter.flush();
+      if (tail) yield { type: 'text', value: tail };
+
+      // Pisahkan blok pilihan dari teks: yang tampil di chat hanya teksnya,
+      // sedangkan pilihannya menjadi blok terstruktur (tombol yang bisa diklik).
+      const parsed = parseChoices(textBuffer);
+      if (parsed.questions.length) {
+        if (textBlock) textBlock.text = parsed.cleaned;
+        const choicesBlock: ChoicesBlock = { type: 'choices', questions: parsed.questions };
+        blocks.push(choicesBlock);
+        yield { type: 'choices', questions: parsed.questions };
+      }
+      const visibleText = parsed.questions.length ? parsed.cleaned : textBuffer;
+
+      if (visibleText.trim()) finalText = finalText ? `${finalText}\n${visibleText}` : visibleText;
 
       if (!calls.length) {
         if (finishReason === 'length') {
@@ -225,17 +246,30 @@ export async function* runAgent(options: RunAgentOptions): AsyncGenerator<AgentE
       yield { type: 'status', message: 'Batas langkah tercapai, meminta ringkasan…' };
       messages.push({ role: 'user', content: stepBudgetNotice() });
       let summaryBlock: TextBlock | null = null;
+      let summaryText = '';
+      const summaryFilter = createChoiceStreamFilter();
       for await (const event of streamChat({ apiKey, model, messages, signal, maxTokens: MAX_OUTPUT_TOKENS, sessionId })) {
         if (event.type === 'text') {
           if (!summaryBlock) {
             summaryBlock = { type: 'text', text: '' };
             blocks.push(summaryBlock);
           }
-          summaryBlock.text += event.value;
-          finalText = finalText ? `${finalText}\n${event.value}` : event.value;
-          yield { type: 'text', value: event.value };
+          summaryText += event.value;
+          summaryBlock.text = summaryText;
+          const visible = summaryFilter.push(event.value);
+          if (visible) yield { type: 'text', value: visible };
         }
       }
+      const summaryTail = summaryFilter.flush();
+      if (summaryTail) yield { type: 'text', value: summaryTail };
+      const parsedSummary = parseChoices(summaryText);
+      if (parsedSummary.questions.length) {
+        if (summaryBlock) summaryBlock.text = parsedSummary.cleaned;
+        blocks.push({ type: 'choices', questions: parsedSummary.questions });
+        yield { type: 'choices', questions: parsedSummary.questions };
+      }
+      const summaryVisible = parsedSummary.questions.length ? parsedSummary.cleaned : summaryText;
+      if (summaryVisible.trim()) finalText = finalText ? `${finalText}\n${summaryVisible}` : summaryVisible;
     }
   } catch (err) {
     const message =
