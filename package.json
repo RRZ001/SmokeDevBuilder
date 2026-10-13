@@ -13,7 +13,11 @@
     "test:files-fallback": "npx --yes tsx@4 tests/files-missing-table.mts",
     "test:preview": "npx --yes tsx@4 tests/preview-recovery.mts",
     "test:prompt": "npx --yes tsx@4 tests/prompt-design.mts",
-    "test:choices": "npx --yes tsx@4 tests/choices.mts"
+    "test:choices": "npx --yes tsx@4 tests/choices.mts",
+    "test:plan": "npx --yes tsx@4 tests/plan-blocks.mts",
+    "test:behavior": "npx --yes tsx@4 tests/agent-behavior.mts",
+    "test:browser": "npx --yes tsx@4 tests/browser-check.mts",
+    "test:browser-loop": "npx --yes tsx@4 tests/browser-loop.mts"
   },
   "dependencies": {
     "@e2b/code-interpreter": "2.8.0",

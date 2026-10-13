@@ -1,6 +1,17 @@
 import type { Sandbox } from '@e2b/code-interpreter';
 import { SANDBOX_PROJECT_DIR } from '@/lib/config';
 import {
+  BROWSER_DIR,
+  BROWSER_MARKER,
+  BROWSER_SCRIPT_PATH,
+  BROWSER_SHOT_PATH,
+  browserScript,
+  judgeReport,
+  parseBrowserReport,
+  summarizeBrowserReport,
+  viewportFor,
+} from '@/lib/sandbox/browser';
+import {
   decideServerReadiness,
   detectFrameworkFromPackageJson,
   evaluatePublicProbe,
@@ -29,6 +40,11 @@ export type ToolResult = {
   output: string;
   previewUrl?: string;
   port?: number;
+  /**
+   * Screenshot hasil `browser_check` (data URL JPEG). Dikirim ke model HANYA
+   * kalau modelnya mendukung gambar; UI menampilkannya selama sesi berjalan.
+   */
+  image?: { dataUrl: string; caption: string };
 };
 
 export type FileEntry = { path: string; name: string; type: 'file' | 'dir'; size: number };
@@ -183,9 +199,33 @@ async function writeServerRegistry(sandbox: Sandbox, records: ServerRecord[]): P
   }
 }
 
-async function rememberServer(sandbox: Sandbox, record: ServerRecord): Promise<void> {
+/**
+ * Catat bahwa sebuah perintah server BARU dijalankan di port ini.
+ *
+ * Ditulis SAAT peluncuran (bukan hanya setelah server terbukti siap) karena dua
+ * hal penting bergantung padanya:
+ *  1. Masa tenggang pemulihan otomatis (`STARTUP_GRACE_MS`) — tanpa catatan ini,
+ *     polling Preview akan menganggap "belum ada server" lalu membunuh proses
+ *     yang sedang kompilasi dan mengulanginya terus.
+ *  2. `readyAt: null` menandai peluncuran ini belum pernah terbukti siap.
+ */
+export async function markServerLaunched(
+  sandbox: Sandbox,
+  record: { port: number; command: string; cwd?: string },
+): Promise<void> {
   const records = await readServerRegistry(sandbox);
-  await writeServerRegistry(sandbox, [...records.filter((r) => r.port !== record.port), record]);
+  await writeServerRegistry(sandbox, [
+    ...records.filter((r) => r.port !== record.port),
+    { port: record.port, command: record.command, cwd: record.cwd ?? '', startedAt: Date.now(), readyAt: null },
+  ]);
+}
+
+/** Tandai server ini benar-benar sudah melayani URL publik (untuk peluncuran ini). */
+export async function markServerReady(sandbox: Sandbox, port: number): Promise<void> {
+  const records = await readServerRegistry(sandbox);
+  const found = records.find((r) => r.port === port);
+  if (!found || found.readyAt) return;
+  await writeServerRegistry(sandbox, records.map((r) => (r.port === port ? { ...r, readyAt: Date.now() } : r)));
 }
 
 async function forgetServer(sandbox: Sandbox, port: number): Promise<void> {
@@ -237,11 +277,18 @@ export async function probePublicUrl(url: string, timeoutMs = 6_000): Promise<Pu
   }
 }
 
-/** Skrip penunggu: selesai lebih cepat kalau prosesnya sudah mati (bukan 30 detik buta). */
+/**
+ * Skrip penunggu: selesai lebih cepat kalau prosesnya sudah mati (bukan menunggu
+ * buta). Jendela tunggunya sengaja cukup panjang (±35 detik) karena dev server
+ * pertama kali di sandbox dingin (unduh dependency + kompilasi) bisa jauh lebih
+ * lambat daripada localhost biasa — dulu 20 detik, dan habisnya jendela itu
+ * dilaporkan sebagai "server tidak siap" sehingga agent/panel Preview menjalankan
+ * ulang server yang sebenarnya sedang menyala.
+ */
 export function readinessScript(port: number, pid?: number): string {
   const alive = pid ? `if ! kill -0 ${pid} 2>/dev/null; then echo "DEAD"; exit 2; fi` : '';
   return `
-for i in $(seq 1 40); do
+for i in $(seq 1 70); do
   ${alive}
   code=$(curl -s -o /dev/null -m 2 -w "%{http_code}" http://127.0.0.1:${port}/ 2>/dev/null || echo 000)
   if [ "$code" != "000" ] && [ -n "$code" ]; then echo "READY $code"; exit 0; fi
@@ -320,6 +367,10 @@ export async function startServer(
       onStderr: options.onOutput ? (chunk) => options.onOutput?.(chunk) : undefined,
     });
     servers(sandbox.sandboxId).set(port, { pid: handle.pid, command: cmd, startedAt: Date.now() });
+    // Catat SEGERA (bukan hanya kalau siap): inilah penanda "server sedang
+    // dinyalakan" yang dipakai pemulihan otomatis untuk menunggu, bukan
+    // membunuh lalu menjalankan ulang proses yang sedang kompilasi.
+    await markServerLaunched(sandbox, { port, command: cmd, cwd });
 
     const probe = await runCommand(sandbox, readinessScript(port, handle.pid), { cwd: '/', timeoutMs: 120_000 });
     const readiness = parseReadiness(`${probe.stdout}\n${probe.stderr}`);
@@ -371,19 +422,38 @@ export async function startServer(
     publicProbe: attempt.publicProbe,
   });
 
+  /**
+   * Bedakan "prosesnya mati" dari "prosesnya masih menyala tapi lambat".
+   * Tanpa pembedaan ini agent menerima pesan "server mati" lalu menjalankan
+   * `start_server` lagi — yang membunuh proses yang sedang kompilasi dan
+   * mengulanginya dari nol (penyebab preview tampak "selalu rusak").
+   */
+  const stillStarting =
+    !decision.ready && attempt.readiness.state === 'timeout' && attempt.publicProbe.status === '000';
+  const reason = stillStarting
+    ? 'Perintah server sudah dijalankan dan prosesnya masih hidup, tetapi belum mendengarkan di port ini. ' +
+      'Server pertama kali di sandbox dingin (unduh dependency + kompilasi) bisa butuh waktu lebih — ' +
+      'JANGAN dijalankan ulang, tunggu lalu cek lagi (panel Preview memeriksa otomatis).'
+    : decision.reason;
+
   if (decision.ready) {
-    await rememberServer(sandbox, { port, command: currentCommand, cwd, startedAt: Date.now() });
-  } else if (attempt.readiness.state === 'dead' || attempt.readiness.state === 'timeout') {
-    // Jangan simpan perintah yang gagal: pemulihan otomatis berikutnya hanya
-    // akan mengulang kegagalan yang sama.
+    await markServerReady(sandbox, port);
+  } else if (attempt.readiness.state === 'dead') {
+    // Prosesnya benar-benar mati (mis. modul tidak ditemukan) → jangan simpan
+    // perintahnya: pemulihan otomatis berikutnya hanya akan mengulangi kegagalan
+    // yang sama.
     await forgetServer(sandbox, port);
   }
+  // TIMEOUT (belum listen, tapi proses masih hidup) → catatan DIBIARKAN, supaya
+  // (a) pemulihan otomatis menunggu masa tenggang alih-alih menjalankan ulang,
+  // dan (b) server yang akhirnya siap tetap punya catatan untuk dihidupkan lagi
+  // setelah sandbox di-pause.
 
   return {
     previewUrl: url,
     ready: decision.ready,
     logs: attempt.logs,
-    reason: decision.reason,
+    reason,
     warning: decision.warning,
     command: currentCommand,
     rebound,
@@ -462,6 +532,179 @@ export async function stopServer(sandbox: Sandbox, port: number): Promise<boolea
 
 export function previewAddress(sandbox: Sandbox, port: number): string {
   return `https://${sandbox.getHost(port)}`;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Pemeriksaan UI dengan browser sungguhan (Playwright)                        */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Pastikan Playwright + Chromium tersedia DI DALAM sandbox.
+ *
+ * Instalasi berat (~200 MB) jadi hanya dilakukan sekali per sandbox, ditandai
+ * file penanda yang bertahan saat sandbox di-pause lalu bangun kembali. Kalau
+ * proyek user sudah punya Playwright sendiri, itu dipakai (tidak memasang lagi).
+ */
+export async function ensureBrowser(
+  sandbox: Sandbox,
+  onOutput?: (text: string) => void,
+): Promise<{ ok: boolean; message: string }> {
+  const script = `
+set -u
+MARKER=${BROWSER_MARKER}
+DIR=${BROWSER_DIR}
+# Token eksplisit, bukan hanya exit code: perintah yang terbunuh batas waktu
+# bisa menghasilkan result tanpa exitCode sehingga tampak "sukses".
+if [ -f "$MARKER" ]; then echo "__AC_BROWSER_READY__ penanda"; exit 0; fi
+if [ ! -d "$DIR" ]; then mkdir -p "$DIR" || { echo "__AC_BROWSER_FAIL__ mkdir"; exit 1; }; fi
+cd "$DIR" || { echo "__AC_BROWSER_FAIL__ cd"; exit 1; }
+if [ ! -f package.json ]; then echo '{"name":"agentcloud-browser","private":true}' > package.json; fi
+echo "Menyiapkan Playwright (sekali per sandbox, ±1-3 menit)..."
+if [ ! -d node_modules/playwright ]; then
+  npm install --no-audit --no-fund playwright@1.62.1 >/dev/null 2>&1 || npm install --no-audit --no-fund playwright >/dev/null 2>&1 || true
+fi
+if [ ! -d node_modules/playwright ]; then echo "__AC_BROWSER_FAIL__ paket playwright tidak terpasang"; exit 1; fi
+echo "Mengunduh Chromium..."
+if ! npx --yes playwright install chromium >/dev/null 2>&1; then
+  # Sebagian image butuh paket sistem; coba sekali lagi dengan --with-deps.
+  if [ "$(id -u)" = "0" ]; then npx --yes playwright install --with-deps chromium >/dev/null 2>&1 || true;
+  else sudo npx --yes playwright install --with-deps chromium >/dev/null 2>&1 || true; fi
+fi
+# Verifikasi nyata: Chromium benar-benar bisa dibuka.
+if node -e "const {chromium}=require('playwright');chromium.launch({args:['--no-sandbox']}).then(b=>b.close()).then(()=>console.log('OK')).catch(e=>{console.log('FAIL '+e.message);process.exit(1)})" 2>/dev/null | grep -q OK; then
+  touch "$MARKER"; echo "__AC_BROWSER_READY__ baru"; exit 0
+fi
+echo "__AC_BROWSER_FAIL__ Chromium tidak bisa dibuka di sandbox ini"; exit 1
+`.trim();
+
+  // Batas 240 detik: tetap di bawah batas durasi fungsi hosting (Vercel Hobby
+  // = 300s). Kalau instalasi belum selesai, panggilan berikutnya MELANJUTKAN
+  // (node_modules + cache npm sudah tersimpan), jadi tidak mengulang dari nol.
+  const res = await runCommand(sandbox, script, { cwd: '/', timeoutMs: 240_000 }).catch((err) => ({
+    ok: false,
+    stdout: '',
+    stderr: err instanceof Error ? err.message : String(err),
+    exitCode: null,
+  }));
+  const out = `${res.stdout}\n${res.stderr}`.trim();
+  onOutput?.(out);
+
+  // Kesiapan ditentukan token eksplisit di keluaran, bukan exit code: perintah
+  // yang terbunuh batas waktu bisa memberi result tanpa exitCode (tampak sukses).
+  if (out.includes('__AC_BROWSER_READY__')) {
+    return { ok: true, message: out.includes('penanda') ? 'browser sudah siap (penanda)' : 'browser siap' };
+  }
+  const failureReason = out.match(/__AC_BROWSER_FAIL__\s*(.*)/)?.[1]?.trim();
+
+  // Belum selesai (bukan berarti gagal permanen): instalasi bisa dilanjutkan.
+  const unfinished = !failureReason || /unduh|Menyiapkan|install/i.test(out);
+  return {
+    ok: false,
+    message:
+      (failureReason ? `Browser gagal disiapkan: ${failureReason}\n` : `Browser belum siap di sandbox.\n${truncate(out, 600)}\n`) +
+      (unfinished
+        ? 'Instalasi kemungkinan belum selesai (butuh 1-3 menit) — panggil `browser_check` SEKALI LAGI untuk melanjutkan; unduhan yang sudah ada tidak diulang.'
+        : 'Verifikasi UI dengan cara lain sementara ini (curl endpoint, periksa HTML) dan sebutkan keterbatasan ini ke user.'),
+  };
+}
+
+export type BrowserCheckOutcome = {
+  ok: boolean;
+  output: string;
+  report: ReturnType<typeof parseBrowserReport>;
+  image?: { dataUrl: string; caption: string };
+};
+
+/** Batas ukuran screenshot yang dikirim ke model/UI (data URL base64). */
+const MAX_IMAGE_DATA_URL = 1_400_000;
+
+/**
+ * Buka halaman di browser dalam sandbox, kumpulkan diagnostik (error konsol,
+ * JS error, request gagal, overflow horizontal, gambar rusak) + screenshot.
+ */
+export async function runBrowserCheck(
+  sandbox: Sandbox,
+  options: {
+    port: number;
+    path?: string;
+    viewport?: string;
+    width?: number;
+    height?: number;
+    fullPage?: boolean;
+    onOutput?: (text: string) => void;
+  },
+): Promise<BrowserCheckOutcome> {
+  const ready = await ensureBrowser(sandbox, options.onOutput);
+  if (!ready.ok) {
+    return { ok: false, output: ready.message, report: null };
+  }
+
+  const viewport = viewportFor(options.viewport, { width: options.width, height: options.height });
+  const path = options.path && options.path.startsWith('/') ? options.path : `/${options.path ?? ''}`;
+  const url = `http://127.0.0.1:${options.port}${path === '/' ? '/' : path}`;
+
+  // Skrip ditulis ulang setiap kali supaya perubahan versi script ikut terpakai.
+  const written = await writeProjectFileAbsolute(sandbox, BROWSER_SCRIPT_PATH, browserScript());
+  if (!written) {
+    return { ok: false, output: `Gagal menulis skrip browser ke ${BROWSER_SCRIPT_PATH}.`, report: null };
+  }
+
+  const run = await runCommand(
+    sandbox,
+    [
+      `AC_URL=${shellQuote(url)}`,
+      `AC_WIDTH=${viewport.width}`,
+      `AC_HEIGHT=${viewport.height}`,
+      `AC_FULL=${options.fullPage ? '1' : '0'}`,
+      `AC_SHOT=${shellQuote(BROWSER_SHOT_PATH)}`,
+      `node ${shellQuote(BROWSER_SCRIPT_PATH)}`,
+    ].join(' '),
+    { cwd: BROWSER_DIR, timeoutMs: 180_000 },
+  );
+
+  const raw = `${run.stdout}\n${run.stderr}`;
+  options.onOutput?.(truncate(raw.replace(/\s+$/, ''), 1_500));
+
+  const report = parseBrowserReport(raw);
+  if (!report) {
+    return {
+      ok: false,
+      output:
+        `Pemeriksaan browser gagal dijalankan (tidak ada laporan). Keluaran mentah:\n${truncate(raw, 900)}\n` +
+        'Periksa apakah server dev benar-benar hidup di port itu dan Playwright bisa dibuka di sandbox.',
+      report: null,
+    };
+  }
+
+  const verdict = judgeReport(report);
+  const output = summarizeBrowserReport(report, verdict, { viewportName: viewport.name });
+
+  let image: BrowserCheckOutcome['image'];
+  if (report.screenshot) {
+    try {
+      const base64 = await sandbox.files.read(BROWSER_SHOT_PATH);
+      const dataUrl = `data:image/jpeg;base64,${String(base64).trim()}`;
+      if (dataUrl.length <= MAX_IMAGE_DATA_URL) {
+        image = { dataUrl, caption: `Screenshot ${url} @ ${viewport.width}x${viewport.height}` };
+      }
+    } catch {
+      /* screenshot opsional */
+    }
+  }
+
+  return { ok: verdict.ok, output, report, image };
+}
+
+/** Tulis file dengan path absolut di dalam sandbox (mis. di luar folder proyek). */
+async function writeProjectFileAbsolute(sandbox: Sandbox, absPath: string, content: string): Promise<boolean> {
+  try {
+    const dir = absPath.slice(0, absPath.lastIndexOf('/'));
+    if (dir) await runCommand(sandbox, `mkdir -p ${shellQuote(dir)}`, { cwd: '/', timeoutMs: 30_000 });
+    await sandbox.files.write(absPath, content);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -554,6 +797,22 @@ export const TOOL_DEFINITIONS = [
         type: 'object',
         properties: { port: { type: 'number', description: 'Port server yang akan dihentikan.' } },
         required: ['port'],
+      },
+    },
+  },
+  {
+    type: 'function' as const,
+    function: {
+      name: 'browser_check',
+      description:
+        'Buka halaman aplikasi di browser sungguhan (Playwright) di dalam sandbox, lalu laporkan apa yang BENAR-BENAR terjadi: status HTTP, error console/JS, request gagal, gambar rusak, scroll horizontal, panjang teks, plus screenshot. WAJIB dipakai sebelum mengklaim pekerjaan UI selesai — status HTTP 200 tidak berarti tampilannya benar. Cek minimal di viewport "mobile" (375px) dan "desktop".',
+      parameters: {
+        type: 'object',
+        properties: {
+          port: { type: 'number', description: 'Port dev server di dalam sandbox (default 3000).' },
+          path: { type: 'string', description: 'Path halaman, mis. "/" atau "/login" (default "/").' },
+          viewport: { type: 'string', enum: ['mobile', 'tablet', 'desktop'], description: 'Ukuran layar (default desktop 1440x900).' },
+        },
       },
     },
   },
@@ -656,6 +915,14 @@ export async function executeTool(ctx: ToolContext, name: string, rawArgs: Recor
         const port = clamp(Number(args.port) || 3000, 1024, 65535);
         const killed = await stopServer(ctx.sandbox, port);
         return { ok: true, output: killed ? `Server di port ${port} dihentikan.` : `Tidak ada server terdaftar di port ${port}.` };
+      }
+
+      case 'browser_check': {
+        const port = clamp(Number(args.port) || 3000, 1024, 65535);
+        const path = typeof args.path === 'string' ? args.path : '/';
+        const viewport = typeof args.viewport === 'string' ? args.viewport : 'desktop';
+        const res = await runBrowserCheck(ctx.sandbox, { port, path, viewport, onOutput: ctx.onOutput });
+        return { ok: res.ok, output: res.output, port, image: res.image };
       }
 
       case 'get_preview_url': {

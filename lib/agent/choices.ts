@@ -16,7 +16,16 @@
  *     :::
  *
  * Semua fungsi di sini MURNI (tanpa I/O) supaya bisa diuji tanpa kredit E2B.
+ * Parsing/filter-nya memakai mesin bersama di ./marker-block (dipakai juga oleh
+ * blok rencana `:::plan`).
  */
+
+import {
+  createMarkerStreamFilter,
+  isBulletLine,
+  splitMarkedBlocks,
+  type MarkerPair,
+} from './marker-block';
 
 export type ChoiceQuestion = { question: string; options: string[] };
 
@@ -25,6 +34,12 @@ export const CHOICES_CLOSE = ':::';
 /** Varian fenced ```choices juga diterima supaya agent tidak mudah salah format. */
 const FENCED_OPEN = '```choices';
 const FENCED_CLOSE = '```';
+
+/** Pasangan penanda yang dikenali (dipakai parser & filter streaming). */
+export const CHOICE_MARKERS: MarkerPair[] = [
+  { open: CHOICES_OPEN, close: CHOICES_CLOSE },
+  { open: FENCED_OPEN, close: FENCED_CLOSE },
+];
 
 const MAX_QUESTIONS = 4;
 const MAX_OPTIONS = 4;
@@ -48,13 +63,10 @@ Aturan:
 - Maksimal 3 pertanyaan, masing-masing 2–4 opsi. Opsi harus SINGKAT (≤ 90 karakter) dan konkret — tulis hal yang benar-benar akan kamu bangun, bukan "Opsi A"/"Lainnya".
 - Sertakan satu opsi bergaya "Terserah, kamu putuskan" bila ada keputusan yang mungkin tidak ingin dipikirkan user.
 - Tulis satu kalimat pengantar singkat SEBELUM blok, dan JANGAN menulis apa pun setelah blok penutup.
+- **Kalau kamu memakai blok ini, JANGAN memanggil tool apa pun di giliran yang sama**: berhenti dan tunggu jawaban user (sistem memang akan menghentikan langkahmu di situ). Bekerjalah setelah user memilih.
 - Blok ini hanya untuk hal yang benar-benar mengubah hasil. JANGAN memakainya untuk basa-basi, konfirmasi sepele, atau saat user sudah spesifik (kalau instruksinya sudah jelas, langsung kerjakan).
 - Cukup satu blok per giliran. Kalau user memilih salah satu opsi, lanjutkan pekerjaan memakai pilihan itu tanpa bertanya lagi hal yang sama.
 - Jangan pernah menaruh kode atau penjelasan panjang di dalam blok pilihan.`;
-
-function isOptionLine(line: string): boolean {
-  return /^\s*[-*•]\s+\S/.test(line);
-}
 
 function isQuestionLine(line: string): boolean {
   return /^\s*(q|pertanyaan)\s*[:.)]\s*\S/i.test(line);
@@ -82,7 +94,7 @@ export function parseChoiceBody(body: string): ChoiceQuestion[] {
       current = question ? { question, options: [] } : null;
       continue;
     }
-    if (isOptionLine(line)) {
+    if (isBulletLine(line)) {
       if (!current) continue;
       if (current.options.length >= MAX_OPTIONS) continue;
       const option = cleanOption(line);
@@ -95,42 +107,7 @@ export function parseChoiceBody(body: string): ChoiceQuestion[] {
 
   return questions
     .filter((q) => q.question && q.options.length >= MIN_OPTIONS)
-    .slice(0, MAX_QUESTIONS)
-    .map((q) => ({ question: q.question, options: [...new Set(q.options)] }));
-}
-
-type Segment = { start: number; end: number; body: string; open: string; close: string };
-
-/** Cari semua blok pilihan (baik `:::choices` maupun fenced) yang sudah lengkap. */
-function findSegments(text: string): Segment[] {
-  const segments: Segment[] = [];
-  let index = 0;
-  while (index < text.length) {
-    const colon = text.indexOf(CHOICES_OPEN, index);
-    const fenced = text.indexOf(FENCED_OPEN, index);
-    let start = -1;
-    let open = CHOICES_OPEN;
-    let close = CHOICES_CLOSE;
-    if (colon !== -1 && (fenced === -1 || colon <= fenced)) {
-      start = colon;
-    } else if (fenced !== -1) {
-      start = fenced;
-      open = FENCED_OPEN;
-      close = FENCED_CLOSE;
-    }
-    if (start === -1) break;
-    const closeAt = text.indexOf(close, start + open.length);
-    if (closeAt === -1) break;
-    segments.push({
-      start,
-      end: closeAt + close.length,
-      body: text.slice(start + open.length, closeAt),
-      open,
-      close,
-    });
-    index = closeAt + close.length;
-  }
-  return segments;
+    .map((q) => ({ ...q, options: [...new Set(q.options)] }));
 }
 
 /**
@@ -140,100 +117,17 @@ function findSegments(text: string): Segment[] {
  * jawaban agent tidak hilang karena kesalahan format.
  */
 export function parseChoices(text: string): { cleaned: string; questions: ChoiceQuestion[] } {
-  const segments = findSegments(text);
-  if (!segments.length) return { cleaned: text, questions: [] };
-
-  let cleaned = '';
-  let cursor = 0;
-  const questions: ChoiceQuestion[] = [];
-
-  for (const segment of segments) {
-    const parsed = parseChoiceBody(segment.body);
-    if (!parsed.length) continue; // biarkan sebagai teks
-    cleaned += text.slice(cursor, segment.start);
-    cursor = segment.end;
-    for (const question of parsed) {
-      if (questions.length < MAX_QUESTIONS) questions.push(question);
-    }
-  }
-
-  if (!questions.length) return { cleaned: text, questions: [] };
-  cleaned += text.slice(cursor);
-  return { cleaned: tidy(cleaned), questions };
-}
-
-function tidy(text: string): string {
-  return text.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  const { cleaned, items } = splitMarkedBlocks(text, CHOICE_MARKERS, parseChoiceBody);
+  return { cleaned, questions: items.slice(0, MAX_QUESTIONS) };
 }
 
 /**
  * Filter streaming: tahan bagian teks yang mungkin bagian dari blok pilihan,
  * supaya markup `:::choices` tidak sempat terlihat berkedip di UI lalu hilang.
  *
- * Cara pakai: `push(chunk)` untuk setiap delta dari model (pakai hasilnya
- * sebagai teks yang ditampilkan), lalu `flush()` di akhir stream.
+ * Catatan: loop agent memakai satu filter gabungan (pilihan + rencana) supaya
+ * kedua penanda tidak saling menahan ekor buffer.
  */
 export function createChoiceStreamFilter(): { push: (chunk: string) => string; flush: () => string } {
-  let buffer = '';
-
-  const drain = (final: boolean): string => {
-    let out = '';
-    for (;;) {
-      const colon = buffer.indexOf(CHOICES_OPEN);
-      const fenced = buffer.indexOf(FENCED_OPEN);
-      let start = -1;
-      let open = CHOICES_OPEN;
-      let close = CHOICES_CLOSE;
-      if (colon !== -1 && (fenced === -1 || colon <= fenced)) start = colon;
-      else if (fenced !== -1) {
-        start = fenced;
-        open = FENCED_OPEN;
-        close = FENCED_CLOSE;
-      }
-
-      if (start === -1) {
-        // Tidak ada pembuka: tahan ekor yang bisa jadi awal penanda.
-        const hold = final ? 0 : pendingMarkerLength(buffer);
-        out += buffer.slice(0, buffer.length - hold);
-        buffer = buffer.slice(buffer.length - hold);
-        break;
-      }
-
-      out += buffer.slice(0, start);
-      const closeAt = buffer.indexOf(close, start + open.length);
-      if (closeAt === -1) {
-        if (final) {
-          // Blok tidak pernah ditutup: tampilkan apa adanya (degradasi wajar),
-          // isinya tetap muncul sebagai teks biasa.
-          out += buffer.slice(start);
-          buffer = '';
-        } else {
-          buffer = buffer.slice(start);
-        }
-        break;
-      }
-      // Blok lengkap: jangan tampilkan isinya, lanjut memeriksa sisa teks.
-      buffer = buffer.slice(closeAt + close.length);
-    }
-    return out;
-  };
-
-  return {
-    push: (chunk: string) => {
-      buffer += chunk ?? '';
-      return drain(false);
-    },
-    flush: () => drain(true),
-  };
-}
-
-/** Panjang ekor buffer yang masih bisa menjadi awal penanda pembuka. */
-function pendingMarkerLength(buffer: string): number {
-  for (const marker of [CHOICES_OPEN, FENCED_OPEN]) {
-    const max = Math.min(marker.length - 1, buffer.length);
-    for (let k = max; k > 0; k -= 1) {
-      if (buffer.endsWith(marker.slice(0, k))) return k;
-    }
-  }
-  return 0;
+  return createMarkerStreamFilter(CHOICE_MARKERS);
 }

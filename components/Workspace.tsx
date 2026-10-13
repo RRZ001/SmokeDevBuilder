@@ -85,11 +85,17 @@ export default function Workspace() {
     online: false,
     loading: false,
     reason: null,
+    pending: false,
   });
 
   const abortRef = useRef<AbortController | null>(null);
   /** Salinan terbaru refreshPreview untuk dipakai di dalam handler stream. */
   const refreshPreviewRef = useRef<((projectId?: string, silent?: boolean) => Promise<void>) | null>(null);
+  /**
+   * Status online terbaru untuk timer polling (tanpa ref, menaruh `preview.online`
+   * di dependency efek akan me-reset timer setiap kali statusnya berubah).
+   */
+  const previewOnlineRef = useRef(false);
   const lineId = useRef(0);
   const autoCreated = useRef(false);
 
@@ -225,6 +231,7 @@ export default function Workspace() {
           listenScope?: PreviewState['listenScope'];
           restarted?: boolean;
           proxyError?: boolean;
+          pending?: boolean;
           reason?: string | null;
         }>(`/api/projects/${id}/sandbox/preview`);
         setPreview((p) => ({
@@ -238,6 +245,7 @@ export default function Workspace() {
           listenScope: data.listenScope ?? null,
           restarted: Boolean(data.restarted),
           proxyError: Boolean(data.proxyError),
+          pending: Boolean(data.pending),
         }));
       } catch (err) {
         setPreview((p) => ({
@@ -245,6 +253,7 @@ export default function Workspace() {
           loading: false,
           online: false,
           status: '000',
+          pending: false,
           reason: err instanceof Error ? err.message : String(err),
         }));
       }
@@ -256,22 +265,70 @@ export default function Workspace() {
     refreshPreviewRef.current = refreshPreview;
   }, [refreshPreview]);
 
+  useEffect(() => {
+    previewOnlineRef.current = preview.online;
+  }, [preview.online]);
+
   /**
-   * Server dev sering baru listen beberapa detik setelah agent melaporkan URL-nya
-   * (npm install, kompilasi Next.js, dsb). Daripada user menekan "Cek status"
-   * berulang kali, pantau otomatis sampai server merespons (maks ~36 detik).
+   * Pantau & pulihkan preview secara otomatis selama tab Preview terlihat.
+   *
+   * Kenapa tidak berhenti setelah beberapa percobaan seperti dulu: dev server di
+   * sandbox dingin butuh jauh lebih lama (unduh dependency + kompilasi) dan
+   * sandbox yang di-pause membuat prosesnya hilang. Dulu polling berhenti setelah
+   * ~36 detik, sehingga user-lah yang harus menekan "Jalankan ulang server" atau
+   * meminta agent — persis keluhan "preview sering mati dan harus diminta dulu".
+   *
+   * Sekarang: cek segera saat tab dibuka, ulangi tiap 5 detik saat belum online
+   * (server sedang disiapkan/dihidupkan), dan tiap 20 detik saat sudah online
+   * (mendeteksi server yang mati saat user sedang melihatnya). Server yang mati
+   * dihidupkan ulang di sisi server oleh route /sandbox/preview.
    */
   useEffect(() => {
-    if (!activeId || !preview.url || preview.online || !capabilities.e2bFromEnv) return;
-    let attempts = 0;
-    const timer = setInterval(() => {
-      attempts += 1;
-      void refreshPreviewRef.current?.(activeId, true);
-      if (attempts >= 9) clearInterval(timer);
-    }, 4_000);
-    return () => clearInterval(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeId, preview.url, preview.online, capabilities.e2bFromEnv]);
+    if (tab !== 'preview' || !activeId || !capabilities.e2bFromEnv) return;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const schedule = (delay: number) => {
+      if (stopped) return;
+      timer = setTimeout(run, delay);
+    };
+
+    const run = async () => {
+      if (stopped) return;
+      // Tab sedang tidak terlihat: jangan memanggil sandbox (hemat kuota E2B dan
+      // tidak menghidupkan server yang tidak sedang dilihat).
+      if (document.hidden) {
+        schedule(10_000);
+        return;
+      }
+      await refreshPreviewRef.current?.(activeId, true);
+      schedule(previewOnlineRef.current ? 20_000 : 5_000);
+    };
+
+    schedule(250);
+    return () => {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [tab, activeId, capabilities.e2bFromEnv]);
+
+  /**
+   * Kembali ke halaman/tab ini → periksa sekali lagi. Sandbox E2B auto-resume,
+   * jadi begitu user kembali, preview biasanya sudah bisa dihidupkan ulang tanpa
+   * perlu menunggu siklus polling.
+   */
+  useEffect(() => {
+    if (tab !== 'preview' || !activeId || !capabilities.e2bFromEnv) return;
+    const onFocus = () => {
+      if (!document.hidden) void refreshPreviewRef.current?.(activeId, true);
+    };
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onFocus);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onFocus);
+    };
+  }, [tab, activeId, capabilities.e2bFromEnv]);
 
   useEffect(() => {
     if (!activeId) return;
@@ -281,7 +338,7 @@ export default function Workspace() {
     setLive(null);
     const project = projects.find((p) => p.id === activeId);
     setSandboxId(project?.sandbox_id ?? null);
-    setPreview((p) => ({ ...p, port: project?.preview_port ?? p.port, online: false, url: null, status: '000' }));
+    setPreview((p) => ({ ...p, port: project?.preview_port ?? p.port, online: false, url: null, status: '000', pending: false }));
     void loadMessages(activeId);
     void refreshFiles(activeId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -429,6 +486,7 @@ export default function Workspace() {
                 listenScope: null,
                 restarted: false,
                 proxyError: false,
+                pending: true,
               }));
               void apiJson(`/api/projects/${activeId}/sandbox/preview`, {
                 method: 'POST',
@@ -446,6 +504,26 @@ export default function Workspace() {
                 blocks.push({ type: 'choices', questions } as UiBlock);
                 flush();
               }
+              break;
+            }
+            case 'plan': {
+              // Daftar rencana yang dicentang seiring pekerjaan berjalan.
+              const items = Array.isArray(event.items) ? event.items : [];
+              if (items.length) {
+                blocks.push({ type: 'plan', items } as UiBlock);
+                flush();
+              }
+              break;
+            }
+            case 'image': {
+              // Screenshot dari browser_check. Hanya tampil selama sesi ini —
+              // sengaja TIDAK disimpan ke database karena ukurannya besar.
+              blocks.push({
+                type: 'image',
+                dataUrl: String(event.dataUrl),
+                caption: String(event.caption ?? ''),
+              } as UiBlock);
+              flush();
               break;
             }
             case 'usage': {
@@ -701,6 +779,7 @@ export default function Workspace() {
         listenScope?: PreviewState['listenScope'];
         restarted?: boolean;
         proxyError?: boolean;
+        pending?: boolean;
         reason?: string | null;
         startedCommand?: string | null;
       }>(`/api/projects/${activeId}/sandbox/preview`, {
@@ -718,6 +797,7 @@ export default function Workspace() {
         listenScope: data.listenScope ?? null,
         restarted: Boolean(data.restarted),
         proxyError: Boolean(data.proxyError),
+        pending: Boolean(data.pending),
       }));
       pushLine(
         data.online ? 'info' : 'error',

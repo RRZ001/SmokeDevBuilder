@@ -15,6 +15,8 @@ type Props = {
   listenScope?: 'all' | 'loopback' | 'none' | 'unknown' | null;
   restarted?: boolean;
   proxyError?: boolean;
+  /** true = server sedang disiapkan/dihidupkan (bukan kegagalan). */
+  pending?: boolean;
   onRefresh: () => void;
   onRestart: () => void;
   onSetPort: (port: number) => void;
@@ -31,6 +33,7 @@ export default function PreviewPanel({
   listenScope,
   restarted,
   proxyError,
+  pending,
   onRefresh,
   onRestart,
   onSetPort,
@@ -137,16 +140,20 @@ export default function PreviewPanel({
         ) : (
           <div className="flex h-full flex-col items-center justify-center gap-2 px-8 text-center">
             <p className="text-[13px] text-ink-300">
-              {canPreview ? 'Server belum merespons di port ini.' : 'Preview belum tersedia.'}
+              {pending
+                ? 'Server sedang disiapkan…'
+                : canPreview
+                  ? 'Server belum merespons di port ini.'
+                  : 'Preview belum tersedia.'}
             </p>
             <p className="max-w-md text-[12px] leading-relaxed text-ink-400">
               {offlineText ??
                 (url
-                  ? 'Server belum merespons di port ini. Kalau agent baru saja menyiapkan proyek, tunggu sebentar — status dicek otomatis setiap 4 detik, dan dev server yang mati akan dicoba dijalankan ulang otomatis.'
+                  ? 'Kalau agent baru saja menyiapkan proyek, tunggu sebentar — panel ini memeriksa status secara berkala dan menjalankan ulang dev server yang mati secara otomatis (termasuk setelah sandbox bangun dari pause).'
                   : 'Jalankan dev server di sandbox, mis. lewat tab Terminal: npm run dev -- --host 0.0.0.0 --port 3000. Agent juga menjalankannya otomatis lewat tool start_server.')}
             </p>
             <p className="text-[11.5px] text-ink-400">
-              {loading ? 'Memeriksa status server…' : 'Pemeriksaan otomatis aktif (tanpa perlu klik).'}
+              {loading ? 'Memeriksa status server…' : 'Pemeriksaan otomatis aktif selama tab ini terbuka (tanpa perlu klik).'}
             </p>
           </div>
         )}

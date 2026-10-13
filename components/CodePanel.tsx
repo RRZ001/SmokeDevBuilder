@@ -23,6 +23,8 @@ export type PreviewState = {
   restarted?: boolean;
   /** true = yang menjawab URL publik adalah halaman error proxy E2B. */
   proxyError?: boolean;
+  /** true = server sedang disiapkan/ditunggu (bukan gagal). */
+  pending?: boolean;
 };
 
 type Props = {
@@ -198,6 +200,7 @@ export default function CodePanel(props: Props) {
           listenScope={props.preview.listenScope ?? null}
           restarted={Boolean(props.preview.restarted)}
           proxyError={Boolean(props.preview.proxyError)}
+          pending={Boolean(props.preview.pending)}
           onRefresh={props.onRefreshPreview}
           onRestart={props.onRestartPreview}
           onSetPort={props.onSetPort}

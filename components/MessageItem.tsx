@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { matchChosenOption } from '@/lib/choice-select';
 import Markdown from './Markdown';
 import { BrainIcon, CheckIcon, ChevronIcon, DotIcon, ExternalIcon, TerminalIcon, WarnIcon } from './icons';
-import type { UiBlock, UiChoicesBlock, UiMessage, UiToolBlock } from './types';
+import type { UiBlock, UiChoicesBlock, UiImageBlock, UiMessage, UiToolBlock } from './types';
 
 const TOOL_LABEL: Record<string, string> = {
   run_command: 'Terminal',
@@ -12,6 +12,7 @@ const TOOL_LABEL: Record<string, string> = {
   read_file: 'Baca file',
   list_files: 'Daftar file',
   start_server: 'Jalankan server',
+  browser_check: 'Cek tampilan di browser',
   stop_server: 'Hentikan server',
   get_preview_url: 'Cek preview',
 };
@@ -35,12 +36,15 @@ export default function MessageItem({
   message,
   onChoose,
   nextUserText,
+  planSuperseded,
 }: {
   message: UiMessage;
   /** Dipanggil saat user mengklik salah satu opsi (mengirimnya sebagai pesan). */
   onChoose?: (text: string) => void;
   /** Pesan user berikutnya - dipakai menandai pilihan yang sudah dijawab. */
   nextUserText?: string | null;
+  /** true = sudah ada blok rencana yang lebih baru (kartu ini diringkas). */
+  planSuperseded?: boolean;
 }) {
   const isUser = message.role === 'user';
   return (
@@ -62,6 +66,7 @@ export default function MessageItem({
                 block={block}
                 onChoose={onChoose}
                 nextUserText={nextUserText}
+                planSuperseded={planSuperseded}
               />
             ))}
             <div className="text-[10.5px] text-muted/70">{fmtTime(message.created_at)}</div>
@@ -76,10 +81,12 @@ function BlockView({
   block,
   onChoose,
   nextUserText,
+  planSuperseded,
 }: {
   block: UiBlock;
   onChoose?: (text: string) => void;
   nextUserText?: string | null;
+  planSuperseded?: boolean;
 }) {
   if (block.type === 'text') {
     return block.text.trim() ? <Markdown>{block.text}</Markdown> : null;
@@ -90,7 +97,96 @@ function BlockView({
   if (block.type === 'choices') {
     return <ChoicesView block={block} onChoose={onChoose} nextUserText={nextUserText} />;
   }
+  if (block.type === 'plan') {
+    return <PlanView block={block} superseded={Boolean(planSuperseded)} />;
+  }
+  if (block.type === 'image') {
+    return <ImageView block={block} />;
+  }
   return <ToolView block={block} />;
+}
+
+/**
+ * Rencana kerja agent sebagai daftar centang.
+ *
+ * Agent mengirim ulang blok `:::plan` dengan `[x]` saat langkahnya selesai, jadi
+ * user bisa melihat progres tanpa membaca ulang seluruh percakapan. Rencana yang
+ * sudah digantikan versi terbaru diringkas (bisa dibuka kembali dengan klik)
+ * supaya chat lama tidak menumpuk kartu panjang.
+ */
+function PlanView({ block, superseded }: { block: { items: Array<{ text: string; done: boolean }> }; superseded: boolean }) {
+  const [open, setOpen] = useState(!superseded);
+  const total = block.items.length;
+  const done = block.items.filter((item) => item.done).length;
+  const pct = total ? Math.round((done / total) * 100) : 0;
+  const allDone = total > 0 && done === total;
+
+  return (
+    <div className="overflow-hidden rounded-xl border border-accent-500/20 bg-white/70 shadow-[0_6px_18px_-14px_rgba(31,27,58,0.4)] backdrop-blur">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-2 px-3 py-2 text-left"
+      >
+        <span className={`flex h-5 w-5 items-center justify-center rounded-md ${allDone ? 'bg-emerald-100 text-emerald-600' : 'bg-accent-100 text-accent-600'}`}>
+          {allDone ? <CheckIcon className="h-3.5 w-3.5" /> : <DotIcon className="h-3 w-3 animate-pulse-dot" />}
+        </span>
+        <span className="text-[12.5px] font-semibold text-[#1F1B3A]">Rencana</span>
+        <span className="rounded-full bg-black/[0.05] px-2 py-0.5 text-[11px] font-medium text-muted">
+          {done}/{total} selesai
+        </span>
+        <span className="ml-auto flex items-center gap-2">
+          <span className="hidden h-1.5 w-16 overflow-hidden rounded-full bg-black/[0.07] sm:block">
+            <span
+              className={`block h-full rounded-full transition-all ${allDone ? 'bg-emerald-400' : 'bg-gradient-to-r from-accent-500 to-accent-700'}`}
+              style={{ width: `${pct}%` }}
+            />
+          </span>
+          <ChevronIcon className={`h-3.5 w-3.5 text-muted transition-transform ${open ? 'rotate-180' : ''}`} />
+        </span>
+      </button>
+
+      {open && (
+        <ul className="space-y-1.5 border-t border-black/[0.06] px-3 py-2.5">
+          {block.items.map((item, index) => (
+            <li key={`${index}-${item.text}`} className="flex items-start gap-2 text-[12.5px] leading-relaxed">
+              <span
+                className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border ${
+                  item.done ? 'border-emerald-400 bg-emerald-400 text-white' : 'border-black/15 bg-white'
+                }`}
+              >
+                {item.done && <CheckIcon className="h-2.5 w-2.5" />}
+              </span>
+              <span className={item.done ? 'text-muted/70 line-through decoration-muted/40' : 'text-[#1F1B3A]'}>{item.text}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Screenshot yang diambil agent lewat browser_check: inilah "mata" agent.
+ * Ditampilkan supaya user bisa menilai hal yang sama seperti yang dinilai agent.
+ */
+function ImageView({ block }: { block: UiImageBlock }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <figure className="overflow-hidden rounded-xl border border-black/[0.07] bg-white/70 p-2 shadow-[0_6px_18px_-14px_rgba(31,27,58,0.4)] backdrop-blur">
+      <button type="button" onClick={() => setOpen((v) => !v)} className="block w-full text-left">
+        <img
+          src={block.dataUrl}
+          alt={block.caption || 'Screenshot halaman'}
+          className={`w-full rounded-lg border border-black/[0.05] ${open ? '' : 'max-h-72 object-cover object-top'}`}
+        />
+      </button>
+      <figcaption className="mt-1.5 flex items-center gap-2 px-1 text-[11px] text-muted">
+        <span className="truncate">{block.caption || 'Screenshot halaman'}</span>
+        <span className="ml-auto shrink-0 text-muted/70">{open ? 'klik untuk kecilkan' : 'klik untuk perbesar'}</span>
+      </figcaption>
+    </figure>
+  );
 }
 
 /**

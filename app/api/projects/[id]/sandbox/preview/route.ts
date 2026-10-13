@@ -3,8 +3,20 @@ import { DEFAULT_PREVIEW_PORT } from '@/lib/config';
 import { getStore } from '@/lib/db';
 import { loadProject } from '@/lib/projects';
 import { getSandbox, hasE2bKey, previewUrl } from '@/lib/sandbox/manager';
-import { planPreviewRecovery, type PreviewStatus } from '@/lib/sandbox/preview-status';
-import { listServers, probeLocalPort, probePublicUrl, readServerRegistry, reviveServer } from '@/lib/sandbox/tools';
+import {
+  MAX_WAIT_MS,
+  planPreviewRecovery,
+  type PreviewStatus,
+  type PublicProbe,
+} from '@/lib/sandbox/preview-status';
+import {
+  listServers,
+  markServerReady,
+  probeLocalPort,
+  probePublicUrl,
+  readServerRegistry,
+  reviveServer,
+} from '@/lib/sandbox/tools';
 import { owner } from '@/lib/session';
 
 export const dynamic = 'force-dynamic';
@@ -13,9 +25,14 @@ type Ctx = { params: Promise<{ id: string }> };
 
 /**
  * Pembatas agar pemulihan otomatis tidak menumpuk: panel Preview melakukan
- * polling tiap 4 detik, sementara menjalankan ulang dev server butuh puluhan
- * detik. Tanpa pembatas, beberapa request bisa menyalakan beberapa server
+ * polling tiap beberapa detik, sementara menjalankan ulang dev server butuh
+ * puluhan detik. Tanpa pembatas, beberapa request bisa menyalakan beberapa server
  * sekaligus di port yang sama.
+ *
+ * Catatan: pembatas ini hanya berlaku di dalam satu proses. Karena itu lapisan
+ * kedua ada di dalam sandbox (catatan `startedAt`/`readyAt` di registry server,
+ * lihat STARTUP_GRACE_MS) supaya instance serverless yang berbeda pun tidak
+ * saling mematikan server.
  */
 const REVIVE_COOLDOWN_MS = 30_000;
 const reviveThrottle = new Map<string, number>();
@@ -29,6 +46,25 @@ async function withReviveLock<T>(key: string, fn: () => Promise<T>): Promise<T> 
   return task;
 }
 
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Tunggu URL publik sampai melayani aplikasi, dengan anggaran waktu terbatas.
+ *
+ * Ini yang membuat preview "menyembuhkan diri" dalam satu request: setelah server
+ * dijalankan, atau saat server sedang menyala, panel tidak perlu diklik ulang
+ * berkali-kali oleh user.
+ */
+async function waitForOnline(url: string, budgetMs: number): Promise<PublicProbe> {
+  const deadline = Date.now() + Math.max(0, Math.min(budgetMs, MAX_WAIT_MS));
+  let last = await probePublicUrl(url);
+  while (!last.online && Date.now() < deadline) {
+    await sleep(2_500);
+    last = await probePublicUrl(url);
+  }
+  return last;
+}
+
 type Sandbox = Awaited<ReturnType<typeof getSandbox>>['sandbox'];
 
 /**
@@ -37,28 +73,33 @@ type Sandbox = Awaited<ReturnType<typeof getSandbox>>['sandbox'];
  * Pemulihan inilah yang membuat preview tetap bisa dipakai setelah sandbox
  * di-pause lama (proses dev server hilang saat bangun) atau cold-boot: perintah
  * server terakhir yang tercatat di sandbox dijalankan ulang, lalu statusnya
- * diukur lagi.
+ * diukur lagi. Server yang BARU dijalankan justru ditunggu (bukan dijalankan
+ * ulang) lewat masa tenggang — lihat planPreviewRecovery().
  */
 async function inspect(sandbox: Sandbox, port: number, allowRevive: boolean): Promise<PreviewStatus> {
   const url = previewUrl(sandbox, port);
+  const key = `${sandbox.sandboxId}:${port}`;
 
   let local = await probeLocalPort(sandbox, port);
   let publicProbe = await probePublicUrl(url);
 
   const records = await readServerRegistry(sandbox);
+  const record = records.find((r) => r.port === port);
   const plan = planPreviewRecovery({
     publicOnline: publicProbe.online,
     localCode: local.code,
     listenScope: local.scope,
-    hasServerRecord: records.some((r) => r.port === port),
+    hasServerRecord: Boolean(record),
+    sinceLaunchMs: record ? Date.now() - record.startedAt : null,
+    sinceReadyMs: record?.readyAt ? Date.now() - record.readyAt : null,
   });
 
   let restarted = false;
   let startedCommand: string | null = null;
+  let pending = false;
   let reason = plan.reason;
 
   if (allowRevive && plan.action === 'revive') {
-    const key = `${sandbox.sandboxId}:${port}`;
     const last = reviveThrottle.get(key) ?? 0;
     if (Date.now() - last >= REVIVE_COOLDOWN_MS) {
       reviveThrottle.set(key, Date.now());
@@ -69,9 +110,37 @@ async function inspect(sandbox: Sandbox, port: number, allowRevive: boolean): Pr
         local = await probeLocalPort(sandbox, port);
         publicProbe = await probePublicUrl(url);
         reason = publicProbe.online ? null : (outcome.reason ?? plan.reason);
+        if (!publicProbe.online) {
+          // Server baru saja dijalankan: beri waktu sebentar di request yang sama
+          // (sisanya ditangani polling berikutnya).
+          const settled = await waitForOnline(url, 15_000);
+          if (settled.online) {
+            publicProbe = settled;
+            reason = null;
+          }
+        }
       }
+    } else {
+      pending = true;
+      reason = 'Dev server sedang dijalankan ulang…';
+    }
+  } else if (allowRevive && plan.action === 'wait') {
+    pending = true;
+    const settled = await waitForOnline(url, plan.waitMs ?? 10_000);
+    if (settled.online) {
+      publicProbe = settled;
+      reason = null;
+      pending = false;
+    } else {
+      local = await probeLocalPort(sandbox, port);
+      reason = plan.reason;
     }
   }
+
+  // Catat peluncuran ini sudah terbukti siap: pemulihan berikutnya (kalau
+  // sandbox di-pause dan prosesnya hilang) boleh langsung menjalankan ulang,
+  // tanpa menunggu masa tenggang.
+  if (publicProbe.online) await markServerReady(sandbox, port);
 
   return {
     url,
@@ -84,6 +153,7 @@ async function inspect(sandbox: Sandbox, port: number, allowRevive: boolean): Pr
     restarted,
     startedCommand,
     reason,
+    pending,
   };
 }
 

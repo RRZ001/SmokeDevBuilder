@@ -11,9 +11,13 @@
  *     perintahnya untuk pemulihan otomatis).
  *  4. Pemulihan otomatis: perintah tersimpan di folder sandbox dipakai untuk
  *     menjalankan ulang server setelah sandbox bangun dari pause.
+ *  5. Masa tenggang penyalaan (STARTUP_GRACE_MS): server yang BARU dijalankan
+ *     ditunggu, bukan dibunuh lalu dijalankan ulang — inilah yang dulu membuat
+ *     preview tampak "selalu mati" lalu butuh diminta ulang ke agent.
  */
 import type { Sandbox } from '@e2b/code-interpreter';
 import {
+  STARTUP_GRACE_MS,
   decideServerReadiness,
   detectFrameworkFromPackageJson,
   evaluatePublicProbe,
@@ -140,6 +144,47 @@ check(
   planPreviewRecovery({ publicOnline: true, localCode: '200', listenScope: 'all', hasServerRecord: true }).action === 'none',
 );
 
+// Masa tenggang penyalaan: inti perbaikan "preview sering mati". Tanpa ini,
+// polling Preview membunuh dev server yang sedang kompilasi lalu mengulanginya.
+{
+  const fresh = planPreviewRecovery({
+    publicOnline: false,
+    localCode: '000',
+    listenScope: 'none',
+    hasServerRecord: true,
+    sinceLaunchMs: 5_000,
+    sinceReadyMs: null,
+  });
+  check('recovery: server BARU dijalankan => ditunggu, bukan dibunuh', fresh.action === 'wait', JSON.stringify(fresh));
+  check('recovery: sisa masa tenggang dilaporkan', (fresh.waitMs ?? 0) > 0 && (fresh.waitMs ?? 0) <= STARTUP_GRACE_MS, String(fresh.waitMs));
+  check(
+    'recovery: masa tenggang habis tanpa pernah siap => revive',
+    planPreviewRecovery({
+      publicOnline: false,
+      localCode: '000',
+      listenScope: 'none',
+      hasServerRecord: true,
+      sinceLaunchMs: STARTUP_GRACE_MS + 1_000,
+      sinceReadyMs: null,
+    }).action === 'revive',
+  );
+  check(
+    'recovery: pernah siap lalu prosesnya hilang => langsung revive (tanpa menunggu)',
+    planPreviewRecovery({
+      publicOnline: false,
+      localCode: '000',
+      listenScope: 'none',
+      hasServerRecord: true,
+      sinceLaunchMs: 5_000,
+      sinceReadyMs: 1_000,
+    }).action === 'revive',
+  );
+  check(
+    'recovery: port terbuka tapi proxy belum meneruskan => tunggu',
+    planPreviewRecovery({ publicOnline: false, localCode: '200', listenScope: 'all', hasServerRecord: false }).action === 'wait',
+  );
+}
+
 /* ------------------------------------------------------- 2. sandbox tiruan */
 
 type Scenario = {
@@ -147,6 +192,8 @@ type Scenario = {
   scope: 'all' | 'loopback';
   /** proses langsung mati (mis. npm run dev gagal karena node_modules hilang) */
   diesImmediately?: boolean;
+  /** proses hidup tetapi tidak pernah listen (dev server lambat/kompilasi) */
+  neverReady?: boolean;
   logs?: string;
 };
 
@@ -186,11 +233,12 @@ class FakeSandbox {
       // Skrip penunggu kesiapan
       if (command.includes('kill -0')) {
         if (this.scenario.diesImmediately) return { pid: 1, stdout: 'DEAD\n', stderr: '', exitCode: 2 };
+        if (this.scenario.neverReady) return { pid: 1, stdout: 'TIMEOUT\n', stderr: '', exitCode: 1 };
         return { pid: 1, stdout: 'READY 200\n', stderr: '', exitCode: 0 };
       }
       // Cek lokal: status HTTP + alamat bind
       if (command.includes('CODE')) {
-        const up = !this.scenario.diesImmediately;
+        const up = !this.scenario.diesImmediately && !this.scenario.neverReady;
         const addr = this.scenario.scope === 'all' ? '0.0.0.0:3000' : '127.0.0.1:3000';
         return {
           pid: 1,
@@ -263,7 +311,11 @@ console.log('\n[3] server gagal start (proses langsung mati)');
   check('tidak dinyatakan siap', res.ready === false);
   check('log penyebab diteruskan ke agent', res.logs.includes('Cannot find module'), res.logs);
   check('alasan menjelaskan server tidak mendengarkan', Boolean(res.reason), String(res.reason));
-  check('perintah gagal TIDAK disimpan (hindari pemulihan sia-sia)', !fake.fs.has(SERVER_REGISTRY_PATH));
+  check(
+    'perintah gagal TIDAK disimpan (hindari pemulihan sia-sia)',
+    parseServerRegistry(fake.fs.get(SERVER_REGISTRY_PATH) ?? '[]').every((r) => r.port !== 3000),
+    fake.fs.get(SERVER_REGISTRY_PATH),
+  );
 }
 
 console.log('\n[4] pemulihan otomatis setelah sandbox bangun dari pause');
@@ -299,6 +351,45 @@ console.log('\n[4] pemulihan otomatis setelah sandbox bangun dari pause');
   const fake = new FakeSandbox({ scope: 'all' });
   const outcome = await reviveServer(fake.asSandbox(), 3000, { probePublic: async () => evaluatePublicProbe(0, '') });
   check('tanpa catatan perintah: tidak ada yang dijalankan', outcome.attempted === false);
+}
+
+console.log('\n[5] server hidup tapi belum listen (dev server lambat/kompilasi)');
+{
+  // Perilaku lama: timeout membuat catatan perintah DIHAPUS, sehingga preview
+  // tidak lagi bisa dipulihkan otomatis dan user harus meminta agent start ulang.
+  const fake = new FakeSandbox({ scope: 'all', neverReady: true });
+  const res = await startServer(fake.asSandbox(), 'npm run dev -- --host 0.0.0.0', 3000, {
+    probePublic: async () => evaluatePublicProbe(0, ''),
+  });
+
+  check('tidak dinyatakan siap', res.ready === false);
+  check('alasan menyebut prosesnya masih hidup', /masih hidup/i.test(res.reason ?? ''), String(res.reason));
+  check('alasan melarang menjalankan ulang', /JANGAN dijalankan ulang/i.test(res.reason ?? ''), String(res.reason));
+  const records = parseServerRegistry(fake.fs.get(SERVER_REGISTRY_PATH) ?? '[]');
+  check('catatan perintah TETAP ada (bisa dipulihkan nanti)', records.some((r) => r.port === 3000), fake.fs.get(SERVER_REGISTRY_PATH));
+  check('catatan menandai peluncuran ini belum siap (readyAt null)', records[0]?.readyAt == null, JSON.stringify(records[0]));
+  check('catatan membawa waktu peluncuran', (records[0]?.startedAt ?? 0) > 0, JSON.stringify(records[0]));
+
+  const plan = planPreviewRecovery({
+    publicOnline: false,
+    localCode: '000',
+    listenScope: 'none',
+    hasServerRecord: true,
+    sinceLaunchMs: Date.now() - (records[0]?.startedAt ?? 0),
+    sinceReadyMs: null,
+  });
+  check('pemulihan otomatis memilih MENUNGGU (bukan membunuh prosesnya)', plan.action === 'wait', JSON.stringify(plan));
+}
+{
+  // Server yang benar-benar siap: ditandai `readyAt` supaya pemulihan berikutnya
+  // (setelah sandbox di-pause) langsung menjalankan ulang tanpa masa tenggang.
+  const fake = new FakeSandbox({ scope: 'all' });
+  const res = await startServer(fake.asSandbox(), 'npm run dev -- --host 0.0.0.0', 3000, {
+    probePublic: async () => evaluatePublicProbe(200, '<h1>app</h1>'),
+  });
+  check('server siap', res.ready === true, String(res.reason));
+  const record = parseServerRegistry(fake.fs.get(SERVER_REGISTRY_PATH) ?? '[]')[0];
+  check('catatan menandai server sudah pernah siap (readyAt)', (record?.readyAt ?? 0) > 0, JSON.stringify(record));
 }
 
 console.log(`\nhasil: ${pass} ok, ${fail} gagal`);

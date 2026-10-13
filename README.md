@@ -12,7 +12,7 @@ Stack: **Next.js 15 (App Router) + React 19 + Tailwind CSS + Supabase (fallback 
 | --- | --- |
 | **Agent loop** | Function calling OpenRouter: model memutuskan kapan menjalankan terminal, menulis file, atau bertanya balik ke kamu. Maksimal 12 langkah per giliran (`AGENT_MAX_STEPS`). |
 | **Cloud sandbox** | Satu proyek = satu sandbox E2B. Sandbox id disimpan di database, jadi sesi bisa disambung ulang (dan otomatis dibuat baru kalau sudah kedaluwarsa). |
-| **Tool eksekusi** | `run_command`, `write_file`, `read_file`, `list_files`, `start_server`, `stop_server`, `get_preview_url`. |
+| **Tool eksekusi** | `run_command`, `write_file`, `read_file`, `list_files`, `start_server`, `stop_server`, `get_preview_url`, `browser_check`. |
 | **Auto-debugging** | Kalau sebuah perintah keluar dengan exit code ≠ 0, output error otomatis dikirim balik ke model sebagai instruksi perbaikan (maksimal 2 ronde berturut-turut, bisa dimatikan lewat toggle **Auto-debug**). |
 | **Proyek tahan sandbox hilang** | File proyek disimpan otomatis ke database dan **dipulihkan ke sandbox baru** — sandbox boleh mati/di-kill/diganti tanpa kehilangan kode. `node_modules` tidak disimpan, jadi setelah restore cukup `npm install` lagi. |
 | **Hemat biaya** | Sandbox idle **di-pause** (E2B tidak menagih saat paused) + auto-resume; prompt caching Claude via `cache_control`; `session_id` untuk menjaga cache tetap hangat; isi file lama tidak dikirim ulang ke model; batas token keluaran; **pemakaian token & biaya tiap giliran ditampilkan di UI**. |
@@ -20,6 +20,8 @@ Stack: **Next.js 15 (App Router) + React 19 + Tailwind CSS + Supabase (fallback 
 | **Reasoning** | Delta `reasoning`/`reasoning_content` OpenRouter (DeepSeek-R1 dll) dirender sebagai blok "Proses berpikir model" yang bisa dilipat. |
 | **Live preview** | iframe ke `https://<port>-<sandbox-id>.e2b.dev`, plus tombol cek status HTTP, ganti port, dan **jalankan ulang server**. Kesiapan server dinilai dari URL publik (bukan `curl` di dalam sandbox), jadi "Closed Port Error" tidak lagi lolos sebagai "siap". |
 | **Preview sembuh sendiri** | Perintah dev server yang berhasil dicatat di dalam sandbox; kalau prosesnya hilang (sandbox bangun dari pause/cold-boot), preview **menjalankan ulang servernya otomatis** — dan kalau servernya cuma bind ke `127.0.0.1`, perintah diulang otomatis dengan flag bind `0.0.0.0` sesuai framework (`--host` / `--hostname`, terdeteksi dari `package.json`). |
+| **Agent bisa MELIHAT tampilannya** | Tool `browser_check` menjalankan browser sungguhan (Playwright) di dalam sandbox: membuka halaman, lalu melaporkan status HTTP, error console & JS, request gagal, gambar rusak, **scroll horizontal di 375px**, halaman hampir kosong, plus **screenshot**. Jika modelmu mendukung gambar, screenshot itu dikirim ke agent sehingga ia menilai tampilan seperti desainer — bukan hanya "HTTP 200". |
+| **Rencana desain dulu** | Sebelum menulis kode UI, agent menyusun rencana desain singkat (subjek & tujuan, 4-6 warna hex bernama, typeface + skala, konsep layout + wireframe ASCII, prinsip) lalu mengujinya sendiri: kalau rencananya bisa dipakai untuk halaman lain yang mirip, itu masih generik dan harus direvisi. |
 | **Desain default menarik** | System prompt memuat panduan desain konkret (gradient indigo→violet→fuchsia, tipografi berani, ilustrasi SVG/CSS, animasi halus, jarak & `gap` yang tegas, uji 375px) sehingga app yang di-generate tidak tampil polos/template — dan panduan itu mengalah bila kamu menyebut gaya/brand sendiri. |
 | **Pilihan yang bisa diklik** | Kalau instruksimu kurang detail, agent menawarkan 2–3 pertanyaan dengan opsi konkret sebagai **tombol** yang bisa langsung kamu klik (jawabannya otomatis terkirim sebagai pesan). Kalau permintaanmu sudah spesifik, agent langsung bekerja tanpa bertanya. Kamu tetap bisa mengetik jawaban sendiri. |
 | **Editor** | File tree sandbox + penampil kode dengan syntax highlighting; kamu juga bisa mengedit dan menyimpan kembali ke sandbox. |
@@ -111,12 +113,14 @@ agentcloud/
 │   │   ├── loop.ts              # ★ agentic loop + auto-debug + budget langkah
 │   │   ├── openrouter.ts        # klien streaming chat/completions + pemetaan error
 │   │   ├── history.ts           # rekonstruksi riwayat model dari blok UI
-│   │   ├── design.ts            # panduan desain UI (versi lengkap + ringkas)
+│   │   ├── design.ts            # panduan desain UI + langkah rencana desain
+│   │   ├── vision.ts            # deteksi model yang bisa menerima gambar
 │   │   ├── choices.ts           # blok pilihan :::choices (parser + filter streaming)
 │   │   └── prompt.ts            # system prompt (mode agent & mode diskusi)
 │   ├── sandbox/
 │   │   ├── manager.ts           # create/connect/kill sandbox + pemasangan Node.js
 │   │   ├── preview-status.ts    # penilaian kesiapan preview (URL publik, bind 0.0.0.0)
+│   │   ├── browser.ts           # pemeriksaan UI dengan Playwright (laporan + screenshot)
 │   │   └── tools.ts             # definisi 7 tool + eksekutor + pengaman perintah
 │   ├── db/
 │   │   ├── index.ts             # pemilih driver + fallback otomatis (Proxy)
@@ -307,7 +311,7 @@ Endpoint berguna untuk diagnosa: `GET /api/health` (runtime + driver storage), `
 | `/api/projects/:id/sandbox/preview` | GET / POST | URL preview + status publik & lokal; GET juga memulihkan dev server yang mati. POST `{port}` = set port, POST `{action:"restart"}` = jalankan ulang server. |
 | `/api/health` | GET | Status runtime, kapabilitas, dan driver storage. |
 
-**Event NDJSON** dari `/api/chat`: `message`, `model`, `status`, `mode`, `sandbox`, `project`, `log`, `text`, `reasoning`, `choices`, `tool_start`, `tool_output`, `tool_result`, `preview`, `usage`, `error`, `saved`, `done`.
+**Event NDJSON** dari `/api/chat`: `message`, `model`, `status`, `mode`, `sandbox`, `project`, `log`, `text`, `reasoning`, `choices`, `image`, `tool_start`, `tool_output`, `tool_result`, `preview`, `usage`, `error`, `saved`, `done`.
 
 **Tool agent** (`lib/sandbox/tools.ts`): `run_command`, `write_file`, `read_file`, `list_files`, `start_server`, `stop_server`, `get_preview_url`.
 
@@ -392,6 +396,8 @@ Biarkan default: `npm run build` saat `NODE_ENV=production` memberi basePath `/a
 | Chat menjawab *"OpenRouter API key belum diisi"* | Isi `OPENROUTER_API_KEY` di environment atau lewat modal Settings. |
 | Badge panel kode menulis *"Sandbox nonaktif (E2B_API_KEY)"* / agent hanya berdiskusi | `E2B_API_KEY` belum diisi. Pasang sebagai variabel environment di hosting, lalu jalankan ulang aplikasi (modal Settings hanya menampilkan status), lalu klik **Mulai sandbox**. |
 | Preview menampilkan *"Server belum merespons di port ini"* / *"Closed Port Error"* | Server dev tidak listen untuk proxy E2B. Aplikasi sudah otomatis menjalankan ulang perintah server terakhir dan menambal bind `0.0.0.0` bila frameworknya dikenali. Kalau masih gagal, klik **Jalankan ulang server** atau minta agent memperbaiki: Vite/Astro → `npm run dev -- --host 0.0.0.0`, Next.js → `npm run dev -- --hostname 0.0.0.0`, Express/Node → `app.listen(port, "0.0.0.0")`. |
+| `browser_check` lama / pertama kali terasa mandek | Panggilan pertama memasang Playwright + Chromium di sandbox (±1-3 menit, **sekali per sandbox**). Kalau hasilnya bilang instalasi belum selesai, panggil sekali lagi — unduhan yang sudah ada tidak diulang. |
+| Agent bilang tidak bisa menilai tampilan secara visual | Model yang dipakai tidak menerima gambar (mis. DeepSeek chat/R1, Kimi K2). `browser_check` tetap memberi diagnostik teks (error console, scroll horizontal, gambar rusak). Pilih model yang mendukung gambar (Claude, GPT, GLM Flash, Kimi K3) kalau butuh penilaian visual. |
 | Preview kosong setelah ditinggal lama (sandbox di-pause) | Normal: saat sandbox bangun, proses dev server bisa hilang. Buka tab Preview — server dijalankan ulang otomatis dari catatan perintah terakhir; tombol **Jalankan ulang server** memaksa bila perlu. |
 | *"OpenRouter menolak API key (401)"* di chat | Key salah/terhapus. Klik **Tes koneksi** di Settings. |
 | *"Kredit OpenRouter tidak cukup (402)"* | Isi saldo di <https://openrouter.ai/credits>. |

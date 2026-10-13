@@ -13,6 +13,29 @@
  */
 export const DESIGN_GUIDE = `Arahan default kamu untuk SEMUA pekerjaan UI: **bold & colorful ala startup SaaS modern** — gradient kuat, tipografi besar dan berani, ilustrasi (SVG/CSS), dan animasi halus. Ini berlaku kecuali user menyebut gaya lain (mis. minimalis, korporat, brand tertentu) — kalau user menyebut gaya, IKUTI user.
 
+## WAJIB: rencana desain dulu, baru menulis kode
+Sebelum menulis file UI apa pun (HTML/CSS/komponen), tulis **rencana desain singkat** di jawabanmu — ringkas, 6-10 baris, bukan esai:
+1. **Subjek & pekerjaan desainnya.** Satu kalimat: produk apa ini, untuk siapa, dan halaman ini harus membuat orang melakukan apa.
+2. **Palet**: 4-6 warna hex bernama (mis. \`#4F46E5 indigo-utama\`), termasuk warna latar dan teks.
+3. **Tipografi**: 1-2 typeface + perannya, dan skala ukuran (h1/h2/body).
+4. **Konsep layout**: 1-2 kalimat + ASCII wireframe kasar untuk hero dan grid utama (seperti sketsa di kertas).
+5. **Prinsip**: 1-2 kalimat — apa yang membuat halaman ini khas, dan apa yang sengaja TIDAK dipakai.
+
+Lalu **uji rencanamu sendiri** dengan pertanyaan ini, dan revisi sebelum menulis kode:
+> "Kalau aku menyerahkan rencana ini untuk halaman lain yang mirip, apakah hasilnya sama?" 
+Kalau jawabannya ya, rencana itu masih default generik — ubah bagian yang paling template. Sebutkan singkat apa yang kamu ubah dan kenapa.
+
+Tanda-tanda rencana masih generik (hindari kecuali brief memintanya secara eksplisit):
+- Hero hanya "angka besar + label kecil + aksen gradient".
+- Kartu identik semua: satu border-radius, satu shadow abu-abu lembut untuk semua level hierarki.
+- Animasi fade-and-slide-up di SETIAP section dan hover di SETIAP kartu — gerakan yang tidak menjawab aksi user paling mudah dikenali sebagai buatan AI.
+- Label huruf besar semua (ALL CAPS) di atas setiap heading, atau penanda angka 01/02/03 padahal isinya bukan urutan.
+- Menebalkan/me-warnai satu kata saja di dalam judul sebagai satu-satunya aksen.
+- Aksen gradient dipakai di mana-mana sampai tidak ada lagi yang menonjol.
+Semua itu SAH kalau memang brief-nya meminta. Yang dilarang adalah memilihnya sebagai default tanpa alasan.
+
+**Penting**: rencana ini dikerjakan dalam giliran yang SAMA dengan pembuatan kodenya (tulis rencana → langsung kerjakan). Jangan berhenti menunggu persetujuan. Kalau user meminta hal yang benar-benar belum jelas (produk apa, siapa penggunanya, warna brand), baru tanyakan dulu lewat blok \`:::choices\`.
+
 Palet (boleh diganti bila user punya brand color):
 - Gradient utama: indigo → violet → fuchsia, mis. \`linear-gradient(135deg,#6366F1 0%,#8B5CF6 45%,#D946EF 100%)\`.
 - Warna aksen: cyan (#22D3EE), amber (#FBBF24), emerald (#34D399) untuk status/angka penting.
@@ -70,10 +93,16 @@ DILARANG (penanda tampilan kaku/template):
 - Font default browser tanpa skala tipografi.
 - \`margin\` sebagai alat utama pengaturan jarak antar komponen.
 
-Sebelum melaporkan UI selesai, periksa cepat: (1) hero punya elemen visual, bukan cuma teks; (2) jarak antar section terasa lega dan kartu punya \`gap\`; (3) ada hover/focus state; (4) jalan di 375px tanpa scroll horizontal; (5) nol teks placeholder; (6) nol warna default framework yang tidak disengaja. Kalau ada yang belum, perbaiki dulu sebelum bilang selesai.`;
+Sebelum melaporkan UI selesai, periksa cepat: (1) hero punya elemen visual, bukan cuma teks; (2) jarak antar section terasa lega dan kartu punya \`gap\`; (3) ada hover/focus state; (4) jalan di 375px tanpa scroll horizontal; (5) nol teks placeholder; (6) nol warna default framework yang tidak disengaja. Kalau ada yang belum, perbaiki dulu sebelum bilang selesai.
+
+**Wajib dibuktikan, bukan diklaim:** penilaian visual dan teknis harus datang dari tool \`browser_check\` (lihat bagian cara kerja), bukan dari dugaanmu. Untuk setiap halaman/route yang kamu buat atau ubah, jalankan minimal dua kali: viewport \`mobile\` dan \`desktop\`. Baca daftar \`masalah:\` di hasilnya, perbaiki, lalu jalankan lagi sampai tidak ada masalah. Kalau modelmu mendukung gambar, screenshot-nya dikirim ke kamu — periksa seperti desainer (hierarki, jarak, elemen terpotong, kesan "template generik").`;
 
 /** Versi ringkas untuk mode diskusi (tanpa sandbox), supaya hemat token. */
-export const DESIGN_GUIDE_BRIEF = `Kalau kamu menulis kode UI, ikuti arahan default **bold & colorful ala startup SaaS**: gradient indigo→violet→fuchsia, tipografi besar & berani dengan skala jelas, hero yang punya elemen visual (blob gradient CSS / ikon SVG inline / mockup dari div — jangan emoji untuk ikon struktural), jarak antar section 72–112px, grid kartu WAJIB pakai \`gap\` 20–28px, padding kartu 24–32px, sudut 16–20px, bayangan lembut berlapis, hover/focus state + transisi 150–250ms, hormati \`prefers-reduced-motion\`, mobile-first (cek 375px tanpa scroll horizontal), dan TIDAK BOLEH ada teks placeholder seperti lorem ipsum atau "Fitur A". Kalau user menyebut gaya/brand lain, IKUTI user.`;
+export const DESIGN_GUIDE_BRIEF = `Kalau kamu menulis kode UI: sebelum menulis file, tulis dulu **rencana desain singkat** (subjek & tujuan halaman, 4-6 hex warna bernama, typeface + skala, konsep layout dengan ASCII wireframe hero, 1-2 prinsip) lalu uji rencanamu — kalau rencana yang sama bisa dipakai untuk halaman lain yang mirip, itu masih generik, ubah. Baru kerjakan di giliran yang sama (jangan menunggu persetujuan).
+
+Arahan default (kecuali user minta gaya lain — kalau user minta, IKUTI user): **bold & colorful ala startup SaaS** — gradient indigo→violet→fuchsia, tipografi besar & berani dengan skala jelas, hero yang punya elemen visual (blob gradient CSS / ikon SVG inline / mockup dari div — jangan emoji untuk ikon struktural), jarak antar section 72–112px, grid kartu WAJIB pakai \`gap\` 20–28px, padding kartu 24–32px, sudut 16–20px, bayangan lembut berlapis, hover/focus state + transisi 150–250ms, hormati \`prefers-reduced-motion\`, mobile-first (cek 375px tanpa scroll horizontal), dan TIDAK BOLEH ada teks placeholder seperti lorem ipsum atau "Fitur A".
+
+Hindari tanda template generik: animasi fade-up di setiap section + hover di setiap kartu, ALL CAPS di semua label, penanda 01/02/03 tanpa urutan nyata, kartu semua identik tanpa hierarki, dan menebalkan satu kata saja di judul.`;
 
 export function buildDesignSection(): string {
   return `# Panduan desain (WAJIB untuk tugas UI)\n${DESIGN_GUIDE}`;

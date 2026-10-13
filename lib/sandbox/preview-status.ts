@@ -28,8 +28,32 @@ export type ServerRecord = {
   port: number;
   command: string;
   cwd: string;
+  /** Kapan perintah ini DIJALANKAN (epoch ms). */
   startedAt: number;
+  /**
+   * Kapan server ini pertama kali terbukti melayani URL publik (epoch ms).
+   * null/absen = masih dalam masa penyalaan untuk peluncuran ini.
+   *
+   * Dipakai untuk membedakan "server baru saja dijalankan, beri waktu" dari
+   * "server sudah pernah siap lalu mati" — yang pertama HARUS ditunggu (kalau
+   * tidak, pemulihan otomatis akan membunuh server yang sedang kompilasi dan
+   * mengulanginya selamanya), yang kedua harus langsung dijalankan ulang.
+   */
+  readyAt?: number | null;
 };
+
+/**
+ * Masa tenggang setelah sebuah perintah server dijalankan, sebelum pemulihan
+ * otomatis boleh membunuh & menjalankannya ulang.
+ *
+ * Angka ini lebih panjang dari waktu start dev server biasa (Vite/Next di sandbox
+ * dingin bisa 30–90 detik) karena kesalahan di sini mahal: pemulihan yang
+ * terburu-buru mematikan proses yang sedang menyala, lalu mengulanginya dari nol.
+ */
+export const STARTUP_GRACE_MS = 150_000;
+
+/** Batas berapa lama satu request boleh menunggu server sebelum menjawab ke UI. */
+export const MAX_WAIT_MS = 20_000;
 
 /** Ciri khas halaman error proxy E2B (lihat "Closed Port Error" di UI). */
 const PROXY_ERROR_PATTERNS = [
@@ -254,7 +278,18 @@ export function decideServerReadiness(input: {
   return { ready: true, warning: null, reason: null };
 }
 
-export type RecoveryPlan = { action: 'none' | 'revive'; reason: string | null };
+export type RecoveryPlan = {
+  /**
+   * 'none'   = tidak ada yang bisa/perlu dilakukan otomatis.
+   * 'wait'   = server sedang menyala / port sudah terbuka; tunggu sebentar,
+   *            JANGAN dijalankan ulang (menjalankan ulang akan mematikannya).
+   * 'revive' = jalankan ulang perintah server yang tersimpan.
+   */
+  action: 'none' | 'wait' | 'revive';
+  reason: string | null;
+  /** Untuk 'wait': saran berapa lama lagi server diberi waktu (ms). */
+  waitMs?: number;
+};
 
 /**
  * Bentuk status preview yang dikirim ke UI (dipakai route preview).
@@ -273,10 +308,16 @@ export type PreviewStatus = {
   restarted: boolean;
   startedCommand: string | null;
   reason: string | null;
+  /** true = server sedang disiapkan/ditunggu (jangan dianggap gagal dulu). */
+  pending: boolean;
 };
 
 /**
  * Rencana pemulihan otomatis untuk panel Preview.
+ *
+ *  - wait   = jangan sentuh apa pun: server baru dijalankan dan mungkin masih
+ *             mengunduh/kompilasi (inilah yang mencegah "bunuh lalu ulang" tanpa
+ *             henti), atau port sudah terbuka dan proxy E2B butuh sesaat lagi.
  *  - revive = jalankan ulang perintah server yang tersimpan di sandbox.
  */
 export function planPreviewRecovery(input: {
@@ -284,8 +325,12 @@ export function planPreviewRecovery(input: {
   localCode: string;
   listenScope: ListenScope;
   hasServerRecord: boolean;
+  /** Umur peluncuran terakhir (ms), null kalau tidak ada catatan. */
+  sinceLaunchMs?: number | null;
+  /** Umur sejak server terakhir terbukti siap (ms), null = belum pernah siap. */
+  sinceReadyMs?: number | null;
 }): RecoveryPlan {
-  const { publicOnline, localCode, listenScope, hasServerRecord } = input;
+  const { publicOnline, localCode, listenScope, hasServerRecord, sinceLaunchMs = null, sinceReadyMs = null } = input;
   if (publicOnline) return { action: 'none', reason: null };
 
   if (listenScope === 'loopback') {
@@ -304,6 +349,16 @@ export function planPreviewRecovery(input: {
   }
 
   if (hasServerRecord) {
+    const stillStarting =
+      sinceLaunchMs != null && sinceReadyMs == null && sinceLaunchMs >= 0 && sinceLaunchMs < STARTUP_GRACE_MS;
+    if (stillStarting) {
+      return {
+        action: 'wait',
+        waitMs: STARTUP_GRACE_MS - sinceLaunchMs,
+        reason:
+          'Dev server baru dijalankan dan sedang menyala (unduh dependency/kompilasi) — preview akan muncul otomatis, tidak perlu dijalankan ulang.',
+      };
+    }
     return {
       action: 'revive',
       reason: 'Dev server tidak merespons — dijalankan ulang otomatis dari perintah terakhir yang dipakai agent.',
@@ -311,7 +366,11 @@ export function planPreviewRecovery(input: {
   }
 
   if (localCode !== '000') {
-    return { action: 'none', reason: 'Port terbuka di sandbox tetapi proxy E2B belum meneruskan. Coba lagi sebentar.' };
+    return {
+      action: 'wait',
+      waitMs: 12_000,
+      reason: 'Port terbuka di sandbox tetapi proxy E2B belum meneruskan. Coba lagi sebentar.',
+    };
   }
 
   return {
@@ -338,11 +397,14 @@ export function parseServerRegistry(raw: string | null | undefined): ServerRecor
     const port = Number(rec.port);
     const command = typeof rec.command === 'string' ? rec.command.trim() : '';
     if (!Number.isInteger(port) || port < 1024 || port > 65535 || !command) continue;
+    const readyAt = Number(rec.readyAt);
     out.push({
       port,
       command,
       cwd: typeof rec.cwd === 'string' && rec.cwd.trim() ? rec.cwd.trim() : '',
       startedAt: Number(rec.startedAt) || 0,
+      // Absen/nol = belum pernah terbukti siap pada peluncuran ini.
+      readyAt: Number.isFinite(readyAt) && readyAt > 0 ? readyAt : null,
     });
   }
   return out;

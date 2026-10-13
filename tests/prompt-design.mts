@@ -39,10 +39,20 @@ check('larangan warna default framework', /Bootstrap/.test(agent) && /0d6efd/.te
 check('ilustrasi tanpa aset eksternal (SVG/CSS)', /Ikon inline SVG/.test(agent) && /blob CSS|blur\(60–90px\)/.test(agent));
 check('hover/focus state wajib', /focus-visible/.test(agent));
 check('daftar periksa sebelum lapor selesai', /Sebelum melaporkan UI selesai/.test(agent));
+check('WAJIB rencana desain dulu', /WAJIB: rencana desain dulu/.test(agent));
+check('rencana memuat palet bernama', /4-6 warna hex bernama/.test(agent));
+check('rencana memuat ASCII wireframe', /ASCII wireframe/.test(agent));
+check('rencana diuji sendiri (anti-generik)', /masih default generik/.test(agent));
+check('rencana tidak menunggu persetujuan', /Jangan berhenti menunggu persetujuan/.test(agent));
+check('daftar tanda generik disebut', /fade-and-slide-up di SETIAP section/.test(agent) && /Kartu identik semua/.test(agent));
+check('skor ALL CAPS disebut sebagai tanda generik', /ALL CAPS/.test(agent));
+check('verifikasi visual wajib lewat browser_check', /jalankan tool \`browser_check\`/.test(agent));
+check('wajib cek mobile & desktop', /viewport \`mobile\` dan \`desktop\`/.test(agent));
+check('dilarang klaim tampilan tanpa browser_check', /JANGAN pernah bilang "tampilannya sudah bagus"/.test(agent));
 check('gaya user mengalahkan default', /IKUTI user/.test(agent));
 check(
   'langkah "Tampilan bukan pelengkap" ada',
-  /3\. \*\*Tampilan bukan pelengkap\.\*\*/.test(agent),
+  /4\. \*\*Tampilan bukan pelengkap\.\*\*/.test(agent),
 );
 check('panduan desain tidak bocor sebagai template literal', !agent.includes('undefined') && !agent.includes('[object Object]'));
 
@@ -50,6 +60,8 @@ console.log('\n[2] mode diskusi pakai versi ringkas (hemat token)');
 check('versi ringkas disisipkan', chat.includes(DESIGN_GUIDE_BRIEF));
 check('versi ringkas menyebut gradient', /gradient indigo→violet→fuchsia/.test(chat));
 check('versi ringkas juga mengalah pada gaya user', /IKUTI user/.test(chat));
+check('versi ringkas memuat aturan rencana desain', /rencana desain singkat/.test(chat));
+check('versi ringkas memuat tanda generik', /tanda template generik/.test(chat));
 check('versi ringkas TIDAK memuat panduan penuh (hemat token)', !chat.includes('## Komponen') || chat.length < agent.length);
 check('prompt diskusi lebih pendek dari prompt agent', chat.length < agent.length, `${chat.length} vs ${agent.length}`);
 
@@ -64,15 +76,19 @@ check('folder proyek disebut', /\/home\/user\/project/.test(agent));
 
 console.log('\n[4] penomoran langkah berurutan');
 {
-  const nums = [...agent.matchAll(/^(\d+)\. \*\*/gm)].map((m) => Number(m[1]));
+  // Daftar bernomor di "Cara kerja yang diharapkan" saja — panduan desain punya
+  // daftar bernomor sendiri (langkah rencana desain), jadi tidak boleh tercampur.
+  const start = agent.indexOf('# Cara kerja yang diharapkan');
+  const workflow = agent.slice(start);
+  const nums = [...workflow.matchAll(/^(\d+)\. \*\*/gm)].map((m) => Number(m[1]));
   const expected = Array.from({ length: nums.length }, (_, i) => i + 1);
   check(`langkah 1..${nums.length} berurutan tanpa duplikat`, JSON.stringify(nums) === JSON.stringify(expected), nums.join(','));
 }
 
 console.log('\n[5] ukuran panduan wajar (biaya token masuk akal)');
-check('panduan < 8 KB', Buffer.byteLength(DESIGN_GUIDE, 'utf8') < 8_000, `${Buffer.byteLength(DESIGN_GUIDE, 'utf8')} byte`);
-check('prompt agent < 20 KB', Buffer.byteLength(agent, 'utf8') < 20_000, `${Buffer.byteLength(agent, 'utf8')} byte`);
-check('versi ringkas < 1,5 KB', Buffer.byteLength(DESIGN_GUIDE_BRIEF, 'utf8') < 1_500);
+check('panduan < 12 KB', Buffer.byteLength(DESIGN_GUIDE, 'utf8') < 12_000, `${Buffer.byteLength(DESIGN_GUIDE, 'utf8')} byte`);
+check('prompt agent < 22 KB', Buffer.byteLength(agent, 'utf8') < 22_000, `${Buffer.byteLength(agent, 'utf8')} byte`);
+check('versi ringkas < 2,5 KB', Buffer.byteLength(DESIGN_GUIDE_BRIEF, 'utf8') < 2_500, `${Buffer.byteLength(DESIGN_GUIDE_BRIEF, 'utf8')} byte`);
 check('buildDesignSection memuat judul + isi', buildDesignSection().startsWith('# Panduan desain') && buildDesignSection().includes('Palet'));
 
 console.log(`\nhasil: ${pass} ok, ${fail} gagal`);

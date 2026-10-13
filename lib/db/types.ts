@@ -25,8 +25,19 @@ export type ToolBlock = {
 export type ChoiceQuestion = { question: string; options: string[] };
 export type ChoicesBlock = { type: 'choices'; questions: ChoiceQuestion[] };
 
+/** Satu langkah rencana yang ditampilkan sebagai daftar centang (lib/agent/plan.ts). */
+export type PlanItem = { text: string; done: boolean };
+export type PlanBlock = { type: 'plan'; items: PlanItem[] };
+
 /** Blok terurut - disimpan di kolom `parts` supaya UI bisa merender ulang chat lama. */
-export type Block = TextBlock | ReasoningBlock | NoticeBlock | UsageBlock | ToolBlock | ChoicesBlock;
+export type Block =
+  | TextBlock
+  | ReasoningBlock
+  | NoticeBlock
+  | UsageBlock
+  | ToolBlock
+  | ChoicesBlock
+  | PlanBlock;
 
 export type Project = {
   id: string;

@@ -1,8 +1,14 @@
 import { OPENROUTER_APP_NAME, OPENROUTER_BASE_URL, OPENROUTER_SITE_URL } from '@/lib/config';
 
+/** Bagian konten bermedia (dipakai untuk mengirim screenshot ke model vision). */
+export type ContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } };
+
 export type ChatMsg = {
   role: 'system' | 'user' | 'assistant' | 'tool';
-  content: string;
+  /** String biasa, atau array bagian ketika menyertakan gambar. */
+  content: string | ContentPart[];
   tool_calls?: OpenRouterToolCall[];
   tool_call_id?: string;
   name?: string;

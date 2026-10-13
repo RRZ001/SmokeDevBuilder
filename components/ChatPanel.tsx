@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import MessageItem from './MessageItem';
 import { GearIcon, SendIcon, SparkIcon, StopIcon, WarnIcon } from './icons';
 import type { UiBlock, UiMessage } from './types';
@@ -84,6 +84,20 @@ export default function ChatPanel({
     setDraft('');
     onSend(text);
   };
+
+  /**
+   * Indeks pesan yang memuat blok rencana PALING BARU.
+   * Rencana yang lebih lama tetap ditampilkan, tapi diringkas (lihat PlanView),
+   * jadi chat tidak dipenuhi kartu daftar tugas yang sudah tidak relevan.
+   * Rencana yang sedang streaming dihitung sebagai yang terbaru.
+   */
+  const lastPlanIndex = useMemo(() => {
+    if (live?.some((block) => block.type === 'plan')) return -1;
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      if (messages[i].blocks.some((block) => block.type === 'plan')) return i;
+    }
+    return -1;
+  }, [messages, live]);
 
   return (
     <section className="relative flex h-full w-full flex-col bg-gradient-to-b from-paper via-paper to-accent-50/70 lg:w-[452px] lg:shrink-0">
@@ -186,6 +200,7 @@ export default function ChatPanel({
             message={message}
             onChoose={running ? undefined : onSend}
             nextUserText={nextUserTextFrom(messages, index)}
+            planSuperseded={index !== lastPlanIndex}
           />
         ))}
 

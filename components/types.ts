@@ -1,12 +1,33 @@
 'use client';
 
-import type { Block, ChoicesBlock, NoticeBlock, ReasoningBlock, TextBlock, ToolBlock, UsageBlock } from '@/lib/db/types';
+import type {
+  Block,
+  ChoicesBlock,
+  NoticeBlock,
+  PlanBlock,
+  ReasoningBlock,
+  TextBlock,
+  ToolBlock,
+  UsageBlock,
+} from '@/lib/db/types';
 
 /** ToolBlock versi UI: menyimpan output yang sedang di-stream secara live. */
 export type UiToolBlock = ToolBlock & { liveOutput?: string };
 export type UiUsageBlock = UsageBlock;
 export type UiChoicesBlock = ChoicesBlock;
-export type UiBlock = TextBlock | ReasoningBlock | NoticeBlock | UiUsageBlock | UiToolBlock | UiChoicesBlock;
+/** Blok rencana (daftar centang) — lihat lib/agent/plan.ts. */
+export type UiPlanBlock = PlanBlock;
+/** Screenshot hasil browser_check — hanya untuk sesi berjalan, tidak disimpan. */
+export type UiImageBlock = { type: 'image'; dataUrl: string; caption: string };
+export type UiBlock =
+  | TextBlock
+  | ReasoningBlock
+  | NoticeBlock
+  | UiUsageBlock
+  | UiToolBlock
+  | UiChoicesBlock
+  | UiPlanBlock
+  | UiImageBlock;
 
 export type UiMessage = {
   id: string;
@@ -72,7 +93,7 @@ export type ProjectLite = {
 
 export type ToolTemplate = { id: string; name: string; args: Record<string, unknown>; status: 'running' | 'ok' | 'error'; output?: string; previewUrl?: string };
 
-export function toUiBlocks(parts: Block[] | null, fallbackText: string): UiBlock[] {
+export function toUiBlocks(parts: UiBlock[] | Block[] | null, fallbackText: string): UiBlock[] {
   if (parts && parts.length) return parts as UiBlock[];
   return fallbackText ? [{ type: 'text', text: fallbackText }] : [];
 }
