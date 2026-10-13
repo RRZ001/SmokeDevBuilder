@@ -69,10 +69,15 @@ console.log('\n[3] aturan lama tidak hilang (regression guard)');
 check('aturiran bind 0.0.0.0 masih ada', /listen di `0\.0\.0\.0`/.test(agent));
 check('status SIAP tool masih dijelaskan', /BELUM SIAP/.test(agent) && /JANGAN bilang preview siap/.test(agent));
 check('larangan mengarang URL preview', /Jangan pernah mengarang URL preview/.test(agent));
+check('halaman error kompilasi tidak boleh disebut preview siap', /halaman error/i.test(agent) && /Module not found/.test(agent));
 check('npm install sebelum start_server', /`npm install`\) SEBELUM `start_server`/.test(agent));
 check('E2B key = variabel environment hosting (bukan Settings)', /variabel environment hosting/.test(chat));
 check('larangan perintah destruktif', /rm -rf \//.test(agent));
 check('folder proyek disebut', /\/home\/user\/project/.test(agent));
+check('tool deploy disebut di daftar tool', /browser_check, deploy\./.test(agent));
+check('deploy hanya kalau user meminta', /Deploy hanya kalau diminta/.test(agent) && /LINK PERMANEN/.test(agent));
+check('token deploy diambil dari Settings (tidak ditulis agent)', /token diambil aplikasi dari Settings/.test(agent));
+check('larangan mengarang URL deploy', /jangan mengarang URL/.test(agent));
 
 console.log('\n[4] penomoran langkah berurutan');
 {

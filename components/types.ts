@@ -55,6 +55,13 @@ export type BootstrapResponse = {
     keySource: 'env' | 'settings' | 'none';
     keyPreview: string;
     updatedAt: string | null;
+    /** Status token deploy Vercel (nilainya sendiri tidak pernah dikirim). */
+    vercel?: {
+      hasToken: boolean;
+      tokenPreview: string;
+      tokenSource: 'env' | 'settings' | 'none';
+      scope: string;
+    };
   };
   projects: ProjectLite[];
   capabilities: {
@@ -89,6 +96,9 @@ export type ProjectLite = {
   preview_port: number | null;
   created_at: string;
   updated_at: string;
+  /** Link permanen hasil deploy ke Vercel (kalau pernah dideploy). */
+  deploy_url?: string | null;
+  deploy_at?: string | null;
 };
 
 export type ToolTemplate = { id: string; name: string; args: Record<string, unknown>; status: 'running' | 'ok' | 'error'; output?: string; previewUrl?: string };

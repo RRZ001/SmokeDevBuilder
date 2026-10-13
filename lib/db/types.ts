@@ -48,6 +48,10 @@ export type Project = {
   preview_port: number | null;
   created_at: string;
   updated_at: string;
+  /** URL hasil deploy terakhir ke Vercel (link permanen, bukan sandbox). */
+  deploy_url: string | null;
+  /** Waktu deploy terakhir (ISO) - null kalau proyek belum pernah dideploy. */
+  deploy_at: string | null;
 };
 
 export type Message = {
@@ -64,6 +68,15 @@ export type Settings = {
   owner_id: string;
   openrouter_api_key: string;
   model: string;
+  /**
+   * Token deploy Vercel (dipilih user: disimpan di database lewat Settings).
+   * Dipakai HANYA di server untuk menjalankan CLI Vercel di dalam sandbox; tidak
+   * pernah dikirim ke browser (yang dikirim hanya cuplikan bertopeng) dan tidak
+   * pernah dibaca model.
+   */
+  vercel_token: string;
+  /** Scope/team slug Vercel (opsional, mis. "tim-saya"). */
+  vercel_scope: string;
   updated_at: string;
 };
 
@@ -100,8 +113,12 @@ export type NewMessage = {
   parts?: Block[] | null;
 };
 
-export type ProjectPatch = Partial<Pick<Project, 'name' | 'description' | 'sandbox_id' | 'preview_port'>>;
-export type SettingsPatch = Partial<Pick<Settings, 'openrouter_api_key' | 'model'>>;
+export type ProjectPatch = Partial<
+  Pick<Project, 'name' | 'description' | 'sandbox_id' | 'preview_port' | 'deploy_url' | 'deploy_at'>
+>;
+export type SettingsPatch = Partial<
+  Pick<Settings, 'openrouter_api_key' | 'model' | 'vercel_token' | 'vercel_scope'>
+>;
 
 export interface Store {
   getSettings(ownerId: string): Promise<Settings | null>;

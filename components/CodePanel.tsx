@@ -25,6 +25,20 @@ export type PreviewState = {
   proxyError?: boolean;
   /** true = server sedang disiapkan/ditunggu (bukan gagal). */
   pending?: boolean;
+  /**
+   * Halaman error yang disajikan dev server (mis. "Module not found:
+   * class-variance-authority") — preview belum benar-benar berisi aplikasi user.
+   */
+  issue?: PreviewIssueInfo | null;
+};
+
+/** Salinan bentuk PreviewIssue dari lib/sandbox/diagnostics (tanpa impor server). */
+export type PreviewIssueInfo = {
+  kind: 'missing-package' | 'compile';
+  title: string;
+  detail: string;
+  packages: string[];
+  fixCommand: string | null;
 };
 
 type Props = {
@@ -51,6 +65,15 @@ type Props = {
   onRefreshPreview: () => void;
   onRestartPreview: () => void;
   onSetPort: (port: number) => void;
+  /** Minta agent memperbaiki masalah yang terbaca di panel Preview. */
+  onAskFixPreview: (message: string) => void;
+  /** Link permanen hasil deploy (Vercel) + status tombol Deploy. */
+  deployUrl: string | null;
+  deployAt: string | null;
+  deployAvailable: boolean;
+  deploying: boolean;
+  deployNote: string | null;
+  onDeploy: () => void;
   activeTab: Tab;
   onTabChange: (tab: Tab) => void;
 };
@@ -201,6 +224,14 @@ export default function CodePanel(props: Props) {
           restarted={Boolean(props.preview.restarted)}
           proxyError={Boolean(props.preview.proxyError)}
           pending={Boolean(props.preview.pending)}
+          issue={props.preview.issue ?? null}
+          onAskFix={props.onAskFixPreview}
+          deployUrl={props.deployUrl}
+          deployAt={props.deployAt}
+          deployAvailable={props.deployAvailable}
+          deploying={props.deploying}
+          deployNote={props.deployNote}
+          onDeploy={props.onDeploy}
           onRefresh={props.onRefreshPreview}
           onRestart={props.onRestartPreview}
           onSetPort={props.onSetPort}

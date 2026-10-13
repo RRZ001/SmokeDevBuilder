@@ -15,6 +15,9 @@ create table if not exists public.ac_settings (
   owner_id          text primary key,
   openrouter_api_key text not null default '',
   model             text not null default '',
+  -- Token deploy Vercel (opsional). Hanya dipakai di server; lihat migration 003.
+  vercel_token      text not null default '',
+  vercel_scope      text not null default '',
   updated_at        timestamptz not null default now()
 );
 
@@ -28,6 +31,8 @@ create table if not exists public.ac_projects (
   description   text not null default '',
   sandbox_id    text,                -- id sandbox E2B yang sedang dipakai
   preview_port  integer,             -- port dev server yang di-preview
+  deploy_url    text,                -- link permanen hasil deploy ke Vercel
+  deploy_at     timestamptz,         -- waktu deploy terakhir
   created_at    timestamptz not null default now(),
   updated_at    timestamptz not null default now()
 );

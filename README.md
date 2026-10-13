@@ -167,6 +167,7 @@ npm run build && npm start
 | --- | --- | --- |
 | `OPENROUTER_API_KEY` | disarankan | Key dari <https://openrouter.ai/keys>. Dipakai untuk semua panggilan model. Boleh dikosongkan bila ingin mengisi lewat UI Settings. |
 | `E2B_API_KEY` | untuk eksekusi | Key dari <https://e2b.dev/dashboard>. Tanpa ini agent jalan di **mode diskusi** (tanpa sandbox/terminal/preview). |
+| `VERCEL_TOKEN` | opsional | Token dari <https://vercel.com/account/tokens>. Dipakai tombol **Deploy ke Vercel** & tool `deploy` milik agent (link permanen). Boleh dikosongkan bila diisi lewat Settings. |
 | `SUPABASE_URL` | opsional | `https://<project-ref>.supabase.co`. Kosong ⇒ otomatis pakai SQLite lokal. |
 | `SUPABASE_SERVICE_ROLE_KEY` | opsional | Disarankan untuk backend (melewati RLS, tetap di server). |
 | `SUPABASE_ANON_KEY` | opsional | Alternatif service role; butuh policy permisif di `supabase/schema.sql`. |
@@ -183,7 +184,8 @@ npm run build && npm start
 | `OPENROUTER_SITE_URL` / `OPENROUTER_APP_NAME` | opsional | Header atribusi OpenRouter. |
 | `AGENTCLOUD_DB_PATH` | opsional | Lokasi file SQLite (default `./data/agentcloud.sqlite`). |
 | `SANDBOX_PROJECT_DIR` | opsional | Folder kerja di dalam sandbox, default `/home/user/project`. |
-| `NEXT_PUBLIC_BASE_PATH` | deploy | Isi dengan `/<nama-app>` saat dipublish di subpath (lihat §10). |
+| `NEXT_PUBLIC_BASE_PATH` | deploy | Isi dengan `/<nama-app>` saat dipublish di subpath (lihat §11). |
+| `VERCEL_TOKEN` | opsional | Token Vercel untuk tombol/tool **deploy** (lihat §10). Boleh dikosongkan bila diisi lewat Settings. |
 
 ---
 
@@ -309,15 +311,40 @@ Endpoint berguna untuk diagnosa: `GET /api/health` (runtime + driver storage), `
 | `/api/projects/:id/sandbox/files` | GET | Daftar file proyek (untuk file tree). |
 | `/api/projects/:id/sandbox/file` | GET / PUT | Baca (`?path=`) / simpan (`{path, content}`) satu file. |
 | `/api/projects/:id/sandbox/preview` | GET / POST | URL preview + status publik & lokal; GET juga memulihkan dev server yang mati. POST `{port}` = set port, POST `{action:"restart"}` = jalankan ulang server. |
+| `/api/projects/:id/deploy` | POST | Deploy proyek ke Vercel (stream NDJSON log): `deploy_start`, `log`, `deploy_url`, `deploy_pending`, `deploy_error`, `done`. Body opsional: `{ cwd?, projectName?, prod? }`. |
 | `/api/health` | GET | Status runtime, kapabilitas, dan driver storage. |
 
-**Event NDJSON** dari `/api/chat`: `message`, `model`, `status`, `mode`, `sandbox`, `project`, `log`, `text`, `reasoning`, `choices`, `image`, `tool_start`, `tool_output`, `tool_result`, `preview`, `usage`, `error`, `saved`, `done`.
+**Event NDJSON** dari `/api/chat`: `message`, `model`, `status`, `mode`, `sandbox`, `project`, `log`, `text`, `reasoning`, `choices`, `plan`, `image`, `tool_start`, `tool_output`, `tool_result`, `preview`, `deploy`, `usage`, `error`, `saved`, `done`.
 
-**Tool agent** (`lib/sandbox/tools.ts`): `run_command`, `write_file`, `read_file`, `list_files`, `start_server`, `stop_server`, `get_preview_url`.
+**Tool agent** (`lib/sandbox/tools.ts`): `run_command`, `write_file`, `read_file`, `list_files`, `start_server`, `stop_server`, `get_preview_url`, `browser_check`, `deploy`.
 
 ---
 
-## 10. Deploy
+## 10. Deploy aplikasi hasil agent ke Vercel (link permanen)
+
+Preview sandbox E2B hanya hidup selama sandbox hidup (server dev-nya mati saat sandbox di-pause). Untuk hasil yang benar-benar **kapan saja bisa dibuka**, agent bisa men-deploy proyek ke **akun Vercel milik user** dan memberikan link permanen seperti `https://nama-proyek.vercel.app`.
+
+**Sekali setup:**
+
+1. Buat token di <https://vercel.com/account/tokens> (pilih scope akun/team yang ingin dipakai).
+2. Tempel di aplikasi: **Settings → Token deploy Vercel** (tombol *Tes token* untuk memastikan valid). Alternatif: isi `VERCEL_TOKEN` sebagai environment variable hosting — nilai dari environment selalu diprioritaskan.
+   - Token hanya dipakai di server (CLI dijalankan di dalam sandbox): **tidak pernah** dikirim ke browser, tidak masuk ke konteks model, dan disaring dari semua log.
+
+**Cara pakai:**
+
+| Cara | Kapan |
+| --- | --- |
+| Tombol **Deploy ke Vercel** (panel Preview) | User menekan sendiri — log deploy muncul di tab Terminal, link permanen tampil di panel Preview dan tersimpan di proyek (bertahan setelah reload). |
+| Perintah di chat ("deploy", "publish", "kasih link permanen") | Agent memanggil tool `deploy` (isi `cwd` bila aplikasi ada di sub-folder). Agent **tidak** deploy tanpa diminta. |
+
+Catatan:
+
+- Deploy berjalan sebagai proses latar di dalam sandbox dengan log ke file, jadi tidak ikut mati kalau request-nya lebih lama daripada batas durasi fungsi hosting. Bila hasilnya menyatakan masih berjalan, tekan Deploy/panggil tool sekali lagi — prosesnya tidak dibatalkan dan dilanjutkan.
+- Yang ditampilkan sebagai link adalah **alias produksi** (`https://<nama>.vercel.app`) yang stabil, bukan URL deployment ber-hash yang berubah setiap deploy.
+- Vercel yang membangun & menghosting aplikasinya; sandbox hanya dipakai untuk mengunggah file. Proyek Next.js/Vite/Express/HTML statis semuanya bisa.
+- Endpoint SQLite/dev server sandbox tidak ikut ter-deploy — pastikan aplikasi tidak bergantung pada sandbox (agent diarahkan begitu oleh system prompt).
+
+## 11. Deploy
 
 ### Build produksi
 ```bash
@@ -377,7 +404,7 @@ Biarkan default: `npm run build` saat `NODE_ENV=production` memberi basePath `/a
 
 ---
 
-## 11. Keamanan & batasan
+## 12. Keamanan & batasan
 
 - **Tanpa autentikasi.** Identitas pemilik data berasal dari cookie httpOnly anonim (`ac_owner`, fallback header dari `localStorage`). Ini cukup untuk satu pemakai/satu browser, **bukan** untuk SaaS multi-user. Untuk produksi: aktifkan Supabase Auth, isi `owner_id` dengan `auth.uid()`, dan ganti policy RLS menjadi `auth.uid()::text = owner_id`.
 - **API key hanya di server.** Key dibaca dari environment atau tabel `ac_settings`, dan tidak pernah dikirim ke browser (yang dikirim hanya versi tersamar).
@@ -389,7 +416,7 @@ Biarkan default: `npm run build` saat `NODE_ENV=production` memberi basePath `/a
 
 ---
 
-## 12. Troubleshooting
+## 13. Troubleshooting
 
 | Gejala | Penyebab & solusi |
 | --- | --- |
@@ -422,7 +449,7 @@ Biarkan default: `npm run build` saat `NODE_ENV=production` memberi basePath `/a
 
 ---
 
-## 13. Perintah berguna
+## 14. Perintah berguna
 
 ```bash
 npm run dev            # server pengembangan (custom server, membaca PORT), di root
@@ -431,6 +458,15 @@ npm start              # jalankan build produksi
 npm run build:root     # build produksi tanpa basePath (uji di root)
 npm run test:files     # uji snapshot & restore file proyek (sandbox tiruan, tanpa kredit E2B)
 npm run test:files-fallback  # uji perilaku saat tabel ac_files belum dibuat
+npm run test:preview   # kesiapan & pemulihan preview (bind loopback, masa tenggang, revive)
+npm run test:diagnostics     # deteksi halaman error dev server (modul belum terpasang)
+npm run test:deploy    # logika deploy Vercel (perintah, parsing log, penyaringan token)
+npm run test:migration # migrasi kolom baru pada database SQLite versi lama
+npm run test:prompt    # system prompt (panduan desain, aturan pilihan/rencana, deploy)
+npm run test:choices   # blok pilihan yang bisa diklik
+npm run test:plan      # blok rencana (checklist)
+npm run test:behavior  # perilaku agent (berhenti saat bertanya, nudge browser_check)
+npm run test:browser   # pemeriksaan UI dengan Chromium sungguhan
 npx next lint          # lint (opsional)
 ```
 

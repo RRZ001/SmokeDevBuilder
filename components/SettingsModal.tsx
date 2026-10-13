@@ -33,6 +33,9 @@ type Props = {
 
 export default function SettingsModal({ open, onClose, settings, capabilities, onSaved }: Props) {
   const [apiKey, setApiKey] = useState('');
+  const [vercelToken, setVercelToken] = useState('');
+  const [vercelScope, setVercelScope] = useState('');
+  const [testingVercel, setTestingVercel] = useState(false);
   const [model, setModel] = useState(settings.model);
   const [models, setModels] = useState<ModelsResponse | null>(null);
   const [loadingModels, setLoadingModels] = useState(false);
@@ -45,6 +48,7 @@ export default function SettingsModal({ open, onClose, settings, capabilities, o
   useEffect(() => {
     if (!open) return;
     setModel(settings.model);
+    setVercelScope(settings.vercel?.scope ?? '');
     setApiKey('');
     setFeedback(null);
   }, [open, settings.model]);
@@ -86,19 +90,41 @@ export default function SettingsModal({ open, onClose, settings, capabilities, o
     setSaving(true);
     setFeedback(null);
     try {
-      const payload: Record<string, unknown> = { model };
+      const payload: Record<string, unknown> = { model, vercel_scope: vercelScope.trim() };
       if (apiKey.trim()) payload.openrouter_api_key = apiKey.trim();
+      // Token deploy hanya dikirim kalau diisi (tidak pernah ditampilkan kembali).
+      if (vercelToken.trim()) payload.vercel_token = vercelToken.trim();
       const data = await apiJson<{ settings: BootstrapResponse['settings'] }>('/api/settings', {
         method: 'POST',
         body: JSON.stringify(payload),
       });
       onSaved(data.settings);
       setApiKey('');
+      setVercelToken('');
       setFeedback({ ok: true, text: 'Pengaturan tersimpan.' });
     } catch (err) {
       setFeedback({ ok: false, text: err instanceof Error ? err.message : String(err) });
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function testVercel() {
+    setTestingVercel(true);
+    setFeedback(null);
+    try {
+      const data = await apiJson<{ ok: boolean; message: string; latencyMs: number }>('/api/settings', {
+        method: 'POST',
+        body: JSON.stringify({
+          action: 'test-vercel',
+          ...(vercelToken.trim() ? { vercel_token: vercelToken.trim() } : {}),
+        }),
+      });
+      setFeedback({ ok: data.ok, text: data.message });
+    } catch (err) {
+      setFeedback({ ok: false, text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setTestingVercel(false);
     }
   }
 
@@ -179,6 +205,54 @@ export default function SettingsModal({ open, onClose, settings, capabilities, o
                 <>
                   <WarnIcon className="h-3.5 w-3.5 text-amber-400" />
                   Belum ada key - chat belum bisa jalan
+                </>
+              )}
+            </p>
+          </section>
+
+          {/* Deploy Vercel */}
+          <section className="rounded-xl border border-white/[0.07] bg-ink-950/60 p-3.5">
+            <label className="block text-[12px] font-semibold text-ink-200">Token deploy Vercel</label>
+            <p className="mt-0.5 text-[11.5px] leading-relaxed text-ink-400">
+              Dipakai tombol <span className="text-ink-200">Deploy ke Vercel</span> dan tool <code className="font-mono text-accent-300">deploy</code> milik agent:
+              proyek dikirim ke akun Vercel kamu dan mendapat <span className="text-ink-200">link permanen</span> yang tetap hidup walau sandbox dimatikan.
+              Buat token di <span className="text-accent-300">vercel.com/account/tokens</span> (scope akun/team yang ingin dipakai). Token hanya dipakai di server —
+              tidak pernah dikirim ke browser maupun ke model.
+            </p>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <input
+                type="password"
+                value={vercelToken}
+                onChange={(e) => setVercelToken(e.target.value)}
+                placeholder={settings.vercel?.hasToken ? `Tersimpan: ${settings.vercel.tokenPreview}` : 'token Vercel…'}
+                className="min-w-0 flex-1 rounded-lg border border-white/10 bg-ink-900 px-3 py-2 font-mono text-[12.5px] text-ink-200 outline-none placeholder:text-ink-600"
+              />
+              <input
+                value={vercelScope}
+                onChange={(e) => setVercelScope(e.target.value)}
+                placeholder="scope/team (opsional)"
+                className="w-40 rounded-lg border border-white/10 bg-ink-900 px-3 py-2 font-mono text-[12.5px] text-ink-200 outline-none placeholder:text-ink-600"
+              />
+              <button
+                type="button"
+                onClick={testVercel}
+                disabled={testingVercel || (!settings.vercel?.hasToken && !vercelToken.trim())}
+                className="rounded-lg border border-white/10 px-3 py-2 text-[12px] font-medium text-ink-200 transition hover:border-accent-300/50 hover:text-white disabled:opacity-50"
+              >
+                {testingVercel ? 'Menguji…' : 'Tes token'}
+              </button>
+            </div>
+            <p className="mt-2 flex items-center gap-1.5 text-[11.5px] text-ink-400">
+              {settings.vercel?.hasToken ? (
+                <>
+                  <CheckIcon className="h-3.5 w-3.5 text-emerald-400" />
+                  Token aktif{settings.vercel.tokenSource === 'env' ? ' dari environment hosting' : ' dari database'}
+                  {settings.vercel.scope ? ` · scope: ${settings.vercel.scope}` : ''}
+                </>
+              ) : (
+                <>
+                  <WarnIcon className="h-3.5 w-3.5 text-amber-400" />
+                  Belum ada token — tombol Deploy belum bisa dipakai
                 </>
               )}
             </p>

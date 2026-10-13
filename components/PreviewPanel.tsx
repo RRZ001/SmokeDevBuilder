@@ -1,7 +1,8 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { ExternalIcon, RefreshIcon } from './icons';
+import { CloudDeployIcon, ExternalIcon, RefreshIcon, WarnIcon } from './icons';
+import type { PreviewIssueInfo } from './CodePanel';
 
 type Props = {
   url: string | null;
@@ -17,9 +18,20 @@ type Props = {
   proxyError?: boolean;
   /** true = server sedang disiapkan/dihidupkan (bukan kegagalan). */
   pending?: boolean;
+  /** Halaman error yang disajikan dev server (preview belum berisi aplikasi user). */
+  issue?: PreviewIssueInfo | null;
   onRefresh: () => void;
   onRestart: () => void;
   onSetPort: (port: number) => void;
+  /** Minta agent memperbaiki masalah yang terbaca di preview ini. */
+  onAskFix?: (message: string) => void;
+  /** Link permanen hasil deploy ke Vercel (kalau proyek pernah dideploy). */
+  deployUrl?: string | null;
+  deployAt?: string | null;
+  deployAvailable?: boolean;
+  deploying?: boolean;
+  deployNote?: string | null;
+  onDeploy?: () => void;
 };
 
 export default function PreviewPanel({
@@ -34,9 +46,17 @@ export default function PreviewPanel({
   restarted,
   proxyError,
   pending,
+  issue,
   onRefresh,
   onRestart,
   onSetPort,
+  onAskFix,
+  deployUrl,
+  deployAt,
+  deployAvailable,
+  deploying,
+  deployNote,
+  onDeploy,
 }: Props) {
   const [portDraft, setPortDraft] = useState(String(port));
   const [nonce, setNonce] = useState(0);
@@ -49,6 +69,18 @@ export default function PreviewPanel({
       : null;
 
   const offlineText = reason ?? bindHint;
+
+  /**
+   * Pesan yang dikirim ke agent saat user menekan "Minta agent perbaiki".
+   * Menyertakan nama paket + perintahnya supaya agent tidak perlu menebak.
+   */
+  const fixRequest = issue
+    ? issue.packages.length
+      ? `Preview menampilkan halaman error, bukan aplikasi: ${issue.title}. Perbaiki dulu (${issue.packages
+          .map((p) => `\`${p}\``)
+          .join(', ')} belum terpasang${issue.fixCommand ? ` — jalankan \`${issue.fixCommand}\`` : ''}), lalu jalankan ulang servernya dan pastikan dengan browser_check sebelum bilang selesai.`
+      : `Preview menampilkan halaman error kompilasi, bukan aplikasi: ${issue.title}. Baca pesan errornya, perbaiki kodenya, jalankan ulang servernya, lalu pastikan dengan browser_check sebelum bilang selesai.`
+    : '';
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -107,12 +139,86 @@ export default function PreviewPanel({
             href={url}
             target="_blank"
             rel="noreferrer"
-            className="flex h-7 items-center gap-1.5 rounded-md bg-accent-500/90 px-2.5 text-[11.5px] font-semibold text-white hover:brightness-110"
+            className="flex h-7 items-center gap-1.5 rounded-md border border-white/10 px-2.5 text-[11.5px] font-medium text-ink-200 hover:text-white"
           >
             <ExternalIcon className="h-3.5 w-3.5" /> Buka tab baru
           </a>
         )}
+        {onDeploy && (
+          <button
+            type="button"
+            onClick={onDeploy}
+            disabled={!canPreview || !deployAvailable || deploying}
+            title={
+              deployAvailable
+                ? 'Deploy proyek ini ke akun Vercel kamu → dapat link permanen yang tetap hidup walau sandbox dimatikan'
+                : 'Isi token Vercel dulu di Settings (ikon gerigi) untuk bisa deploy'
+            }
+            className="flex h-7 items-center gap-1.5 rounded-md bg-accent-500/90 px-2.5 text-[11.5px] font-semibold text-white hover:brightness-110 disabled:opacity-40"
+          >
+            <CloudDeployIcon className="h-3.5 w-3.5" /> {deploying ? 'Mendeploy…' : 'Deploy ke Vercel'}
+          </button>
+        )}
       </div>
+
+      {(deployUrl || deployNote) && (
+        <div className="flex flex-wrap items-center gap-2 border-b border-white/[0.06] bg-white/[0.02] px-3 py-1.5 text-[11.5px] text-ink-300">
+          {deployUrl ? (
+            <>
+              <span className="font-semibold text-emerald-300">Link permanen:</span>
+              <a
+                href={deployUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="min-w-0 flex-1 truncate font-mono text-accent-300 underline decoration-dotted hover:text-accent-200"
+              >
+                {deployUrl}
+              </a>
+              {deployAt && <span className="shrink-0 text-ink-500">dideploy {new Date(deployAt).toLocaleString('id-ID')}</span>}
+              <a
+                href={deployUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="flex h-6 shrink-0 items-center gap-1 rounded-md border border-white/10 px-2 text-ink-200 hover:text-white"
+              >
+                <ExternalIcon className="h-3 w-3" /> Buka
+              </a>
+            </>
+          ) : (
+            <span className="min-w-0 flex-1 truncate">{deployNote}</span>
+          )}
+        </div>
+      )}
+
+      {issue && (
+        <div className="border-b border-rose-300/25 bg-rose-400/[0.12] px-3 py-2 text-[11.5px] leading-relaxed text-rose-100">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="flex items-center gap-1.5 font-semibold text-rose-200">
+              <WarnIcon className="h-3.5 w-3.5" /> Preview belum berisi aplikasi
+            </span>
+            <span className="min-w-0 flex-1 truncate text-rose-100/90">{issue.title}</span>
+            {onAskFix && fixRequest && (
+              <button
+                type="button"
+                onClick={() => onAskFix(fixRequest)}
+                className="h-6 shrink-0 rounded-md bg-rose-200/90 px-2.5 text-[11.5px] font-semibold text-rose-900 hover:brightness-105"
+              >
+                Minta agent perbaiki
+              </button>
+            )}
+          </div>
+          {issue.detail && (
+            <pre className="mt-1.5 max-h-24 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] text-rose-100/80 light-scroll">
+              {issue.detail}
+            </pre>
+          )}
+          {issue.fixCommand && (
+            <p className="mt-1 text-rose-100/80">
+              Perbaikan yang disarankan: <code className="rounded bg-black/25 px-1 font-mono">{issue.fixCommand}</code>
+            </p>
+          )}
+        </div>
+      )}
 
       {(restarted || proxyError) && (
         <div

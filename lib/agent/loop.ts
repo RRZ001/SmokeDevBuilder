@@ -30,6 +30,8 @@ export type AgentEvent =
   | { type: 'tool_output'; id: string; value: string }
   | { type: 'tool_result'; id: string; name: string; ok: boolean; output: string; previewUrl?: string }
   | { type: 'preview'; url: string; port: number }
+  /** Link permanen hasil deploy (Vercel) — bukan URL sandbox yang bisa mati. */
+  | { type: 'deploy'; url: string }
   | { type: 'usage'; value: UsageInfo }
   | { type: 'error'; message: string }
   | { type: 'done'; blocks: Block[]; content: string; finishReason?: string };
@@ -262,7 +264,13 @@ export async function* runAgent(options: RunAgentOptions): AsyncGenerator<AgentE
         };
 
         if (result.previewUrl) {
-          yield { type: 'preview', url: result.previewUrl, port: result.port ?? 3000 };
+          // `deploy` mengembalikan LINK PERMANEN (Vercel), bukan URL sandbox:
+          // jangan diperlakukan sebagai preview (yang bisa mati saat pause).
+          if (call.name === 'deploy') {
+            yield { type: 'deploy', url: result.previewUrl };
+          } else {
+            yield { type: 'preview', url: result.previewUrl, port: result.port ?? 3000 };
+          }
         }
 
         // Screenshot: ditampilkan live ke UI, dan (kalau modelnya bisa melihat)

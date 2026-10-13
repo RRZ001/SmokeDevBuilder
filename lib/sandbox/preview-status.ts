@@ -14,6 +14,14 @@
  * localhost.
  */
 
+import {
+  detectPreviewIssue,
+  installCommand,
+  summarizeIssue,
+  type PackageManager,
+  type PreviewIssue,
+} from '@/lib/sandbox/diagnostics';
+
 export type ListenScope = 'all' | 'loopback' | 'none' | 'unknown';
 
 export type PublicProbe = {
@@ -22,6 +30,12 @@ export type PublicProbe = {
   online: boolean;
   /** true = yang menjawab adalah halaman error proxy E2B, bukan aplikasi user. */
   proxyError: boolean;
+  /**
+   * Halaman yang disajikan dev server TAPI bukan aplikasi user (mis. halaman
+   * "Failed to compile"/"Module not found"). `online` tetap true karena server
+   * memang hidup — tetapi preview-nya belum bisa dipakai.
+   */
+  issue?: PreviewIssue | null;
 };
 
 export type ServerRecord = {
@@ -75,14 +89,17 @@ export function isProxyErrorBody(body: string): boolean {
  *  - 502/503/504         -> gateway error, tidak pernah datang dari dev server
  *                           yang sehat => belum online.
  *  - status lain (termasuk 4xx/500 dari aplikasi) -> ONLINE: servernya memang
- *    hidup, halamannya sendiri yang bermasalah.
+ *    hidup, halamannya sendiri yang bermasalah. Kalau halaman itu ternyata
+ *    halaman error kompilasi (`issue`), server dianggap hidup TAPI preview-nya
+ *    belum siap dipakai (lihat decideServerReadiness).
  */
-export function evaluatePublicProbe(status: number, body: string): PublicProbe {
+export function evaluatePublicProbe(status: number, body: string, log?: string): PublicProbe {
   const code = Number.isFinite(status) && status > 0 ? String(status) : '000';
   const proxyError = isProxyErrorBody(body);
   const gateway = status >= 502 && status <= 504;
   const online = code !== '000' && !proxyError && !gateway;
-  return { status: code, online, proxyError };
+  const issue = online ? detectPreviewIssue({ status, body, log }) : null;
+  return { status: code, online, proxyError, issue };
 }
 
 export type Readiness = { state: 'ready' | 'dead' | 'timeout' | 'unknown'; code: string | null };
@@ -208,6 +225,8 @@ export type ServerReadiness = {
   warning: string | null;
   /** Penjelasan kenapa belum siap (null kalau sudah siap). */
   reason: string | null;
+  /** Masalah halaman (mis. modul belum terpasang) yang membuat preview belum siap. */
+  issue?: PreviewIssue | null;
 };
 
 /**
@@ -224,11 +243,31 @@ export function decideServerReadiness(input: {
   localCode: string;
   listenScope: ListenScope;
   publicProbe: PublicProbe;
+  /** Paket manager terdeteksi dari lockfile (dipakai menyusun perintah perbaikan). */
+  packageManager?: PackageManager;
 }): ServerReadiness {
-  const { localCode, listenScope, publicProbe } = input;
+  const { localCode, listenScope, publicProbe, packageManager } = input;
   const localUp = localCode !== '000';
 
-  if (publicProbe.online) return { ready: true, warning: null, reason: null };
+  /**
+   * Server MENJAWAB, tapi yang disajikan adalah halaman error kompilasi (mis.
+   * Next.js "Failed to compile — Module not found"). Ini insiden nyata: preview
+   * dulu dinyatakan siap karena ada status HTTP, sehingga agent melapor "preview
+   * sudah bisa dibuka" sementara user melihat layar error. Preview belum dianggap
+   * siap sampai halamannya benar-benar aplikasi user.
+   */
+  const baseIssue = publicProbe.issue ?? detectPreviewIssue({ status: Number(publicProbe.status) });
+  // Kalau pemanggil sudah mendeteksi package manager dari lockfile, perintah
+  // perbaikannya disusun ulang memakai manager itu (mis. `pnpm add ...`).
+  const issue =
+    baseIssue && baseIssue.packages.length && packageManager
+      ? { ...baseIssue, fixCommand: installCommand(packageManager, baseIssue.packages) }
+      : baseIssue;
+  if (publicProbe.online && issue) {
+    return { ready: false, warning: null, reason: summarizeIssue(issue), issue };
+  }
+
+  if (publicProbe.online) return { ready: true, warning: null, reason: null, issue: null };
 
   if (publicProbe.proxyError || (Number(publicProbe.status) >= 502 && Number(publicProbe.status) <= 504)) {
     if (listenScope === 'loopback') {
@@ -274,8 +313,10 @@ export function decideServerReadiness(input: {
   }
 
   // Ada status HTTP nyata & bukan halaman error proxy: aplikasinya hidup,
-  // hanya halaman/route-nya yang bermasalah.
-  return { ready: true, warning: null, reason: null };
+  // hanya halaman/route-nya yang bermasalah (4xx/5xx dari app sendiri tetap
+  // dianggap siap — yang tidak boleh dianggap siap adalah halaman error
+  // kompilasi dev server, dan itu sudah ditangani di atas).
+  return { ready: true, warning: null, reason: null, issue: null };
 }
 
 export type RecoveryPlan = {
@@ -310,6 +351,8 @@ export type PreviewStatus = {
   reason: string | null;
   /** true = server sedang disiapkan/ditunggu (jangan dianggap gagal dulu). */
   pending: boolean;
+  /** Halaman error (mis. modul belum terpasang) yang membuat preview belum bisa dipakai. */
+  issue?: PreviewIssue | null;
 };
 
 /**
@@ -329,9 +372,25 @@ export function planPreviewRecovery(input: {
   sinceLaunchMs?: number | null;
   /** Umur sejak server terakhir terbukti siap (ms), null = belum pernah siap. */
   sinceReadyMs?: number | null;
+  /**
+   * Masalah halaman (mis. halaman error kompilasi). Kalau ada, menjalankan ulang
+   * server TIDAK akan menolong — yang perlu diperbaiki kodenya/dependency-nya —
+   * jadi pemulihan otomatis harus berhenti dan melaporkan masalahnya.
+   */
+  issue?: PreviewIssue | null;
 }): RecoveryPlan {
-  const { publicOnline, localCode, listenScope, hasServerRecord, sinceLaunchMs = null, sinceReadyMs = null } = input;
-  if (publicOnline) return { action: 'none', reason: null };
+  const {
+    publicOnline,
+    localCode,
+    listenScope,
+    hasServerRecord,
+    sinceLaunchMs = null,
+    sinceReadyMs = null,
+    issue = null,
+  } = input;
+
+  if (publicOnline && !issue) return { action: 'none', reason: null };
+  if (issue) return { action: 'none', reason: summarizeIssue(issue) };
 
   if (listenScope === 'loopback') {
     if (hasServerRecord) {

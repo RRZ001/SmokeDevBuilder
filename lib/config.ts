@@ -24,6 +24,12 @@ export const OPENROUTER_SITE_URL = (process.env.OPENROUTER_SITE_URL || '').trim(
 export const OPENROUTER_APP_NAME = (process.env.OPENROUTER_APP_NAME || 'AgentCloud').trim();
 
 export const E2B_API_KEY_ENV = (process.env.E2B_API_KEY || '').trim();
+/**
+ * Token deploy Vercel (opsional). Kalau diisi di environment hosting, ia
+ * digunakan dan mengalahkan nilai yang disimpan di Settings — berguna untuk
+ * pemasangan tim. Nilainya TIDAK pernah dikirim ke browser.
+ */
+export const VERCEL_TOKEN_ENV = (process.env.VERCEL_TOKEN || '').trim();
 export const E2B_SANDBOX_TIMEOUT_MS = clampInt(process.env.E2B_SANDBOX_TIMEOUT_MS, 60_000, 86_400_000, 600_000);
 
 /**

@@ -54,6 +54,8 @@ export class SqliteStore implements Store {
           owner_id TEXT PRIMARY KEY,
           openrouter_api_key TEXT NOT NULL DEFAULT '',
           model TEXT NOT NULL DEFAULT '',
+          vercel_token TEXT NOT NULL DEFAULT '',
+          vercel_scope TEXT NOT NULL DEFAULT '',
           updated_at TEXT NOT NULL
         );
 
@@ -64,6 +66,8 @@ export class SqliteStore implements Store {
           description TEXT NOT NULL DEFAULT '',
           sandbox_id TEXT,
           preview_port INTEGER,
+          deploy_url TEXT,
+          deploy_at TEXT,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
@@ -93,6 +97,14 @@ export class SqliteStore implements Store {
         CREATE INDEX IF NOT EXISTS idx_ac_messages_project ON ac_messages (project_id, created_at ASC);
         CREATE INDEX IF NOT EXISTS idx_ac_files_owner ON ac_files (owner_id, project_id);
       `);
+
+      // Kolom yang ditambahkan setelah rilis pertama (database lama harus ikut
+      // dapat). ALTER TABLE di SQLite tidak punya "IF NOT EXISTS", jadi dicek
+      // lewat PRAGMA table_info. Tetap di dalam transaksi bootstrap.
+      addColumnIfMissing(this.db, 'ac_settings', 'vercel_token', "TEXT NOT NULL DEFAULT ''");
+      addColumnIfMissing(this.db, 'ac_settings', 'vercel_scope', "TEXT NOT NULL DEFAULT ''");
+      addColumnIfMissing(this.db, 'ac_projects', 'deploy_url', 'TEXT');
+      addColumnIfMissing(this.db, 'ac_projects', 'deploy_at', 'TEXT');
     })();
   }
 
@@ -110,6 +122,8 @@ export class SqliteStore implements Store {
       owner_id: ownerId,
       openrouter_api_key: '',
       model: '',
+      vercel_token: '',
+      vercel_scope: '',
       updated_at: new Date().toISOString(),
     };
     const next: Settings = {
@@ -120,11 +134,13 @@ export class SqliteStore implements Store {
     };
     this.db
       .prepare(
-        `INSERT INTO ac_settings (owner_id, openrouter_api_key, model, updated_at)
-         VALUES (@owner_id, @openrouter_api_key, @model, @updated_at)
+        `INSERT INTO ac_settings (owner_id, openrouter_api_key, model, vercel_token, vercel_scope, updated_at)
+         VALUES (@owner_id, @openrouter_api_key, @model, @vercel_token, @vercel_scope, @updated_at)
          ON CONFLICT(owner_id) DO UPDATE SET
            openrouter_api_key = excluded.openrouter_api_key,
            model = excluded.model,
+           vercel_token = excluded.vercel_token,
+           vercel_scope = excluded.vercel_scope,
            updated_at = excluded.updated_at`,
       )
       .run(next);
@@ -154,13 +170,15 @@ export class SqliteStore implements Store {
       description: (input.description ?? '').trim(),
       sandbox_id: null,
       preview_port: null,
+      deploy_url: null,
+      deploy_at: null,
       created_at: now,
       updated_at: now,
     };
     this.db
       .prepare(
-        `INSERT INTO ac_projects (id, owner_id, name, description, sandbox_id, preview_port, created_at, updated_at)
-         VALUES (@id, @owner_id, @name, @description, @sandbox_id, @preview_port, @created_at, @updated_at)`,
+        `INSERT INTO ac_projects (id, owner_id, name, description, sandbox_id, preview_port, deploy_url, deploy_at, created_at, updated_at)
+         VALUES (@id, @owner_id, @name, @description, @sandbox_id, @preview_port, @deploy_url, @deploy_at, @created_at, @updated_at)`,
       )
       .run(project);
     return project;
@@ -173,7 +191,7 @@ export class SqliteStore implements Store {
     this.db
       .prepare(
         `UPDATE ac_projects SET name = @name, description = @description, sandbox_id = @sandbox_id,
-           preview_port = @preview_port, updated_at = @updated_at
+           preview_port = @preview_port, deploy_url = @deploy_url, deploy_at = @deploy_at, updated_at = @updated_at
          WHERE id = @id AND owner_id = @owner_id`,
       )
       .run(next);
@@ -301,6 +319,8 @@ function rowToSettings(row: Row): Settings {
     owner_id: String(row.owner_id),
     openrouter_api_key: String(row.openrouter_api_key ?? ''),
     model: String(row.model ?? ''),
+    vercel_token: String(row.vercel_token ?? ''),
+    vercel_scope: String(row.vercel_scope ?? ''),
     updated_at: String(row.updated_at),
   };
 }
@@ -313,9 +333,18 @@ function rowToProject(row: Row): Project {
     description: String(row.description ?? ''),
     sandbox_id: row.sandbox_id ? String(row.sandbox_id) : null,
     preview_port: row.preview_port == null ? null : Number(row.preview_port),
+    deploy_url: row.deploy_url ? String(row.deploy_url) : null,
+    deploy_at: row.deploy_at ? String(row.deploy_at) : null,
     created_at: String(row.created_at),
     updated_at: String(row.updated_at),
   };
+}
+
+/** Tambah kolom bila belum ada (SQLite tidak mendukung ADD COLUMN IF NOT EXISTS). */
+function addColumnIfMissing(db: Database.Database, table: string, column: string, definition: string): void {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name?: unknown }>;
+  if (columns.some((c) => String(c.name) === column)) return;
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
 }
 
 function rowToMessage(row: Row): Message {

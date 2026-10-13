@@ -26,6 +26,26 @@ import {
   type Readiness,
   type ServerRecord,
 } from '@/lib/sandbox/preview-status';
+import {
+  detectPreviewIssue,
+  packageManagerFromLockfile,
+  summarizeIssue,
+  type PackageManager,
+  type PreviewIssue,
+} from '@/lib/sandbox/diagnostics';
+import {
+  DEPLOY_LOG_PATH,
+  DEPLOY_POLL_MS,
+  DEPLOY_TIMEOUT_MS,
+  VERCEL_MARKER,
+  buildDeployCommand,
+  deployShellCommand,
+  explainDeployError,
+  parseDeployStatus,
+  redactSecrets,
+  type DeployState,
+  type DeployStatus,
+} from '@/lib/deploy/vercel';
 import { humanSize, joinSandboxPath, normalize, relPath, truncate } from '@/lib/util';
 
 export type ToolContext = {
@@ -33,6 +53,11 @@ export type ToolContext = {
   sandboxId: string;
   /** Callback untuk meneruskan output terminal ke UI secara live. */
   onOutput?: (text: string) => void;
+  /**
+   * Kredensial deploy milik user (dari Settings, dibaca server-side).
+   * Agent TIDAK pernah melihat nilainya — hanya hasil deploy-nya.
+   */
+  deploy?: { token: string; scope: string; projectName?: string };
 };
 
 export type ToolResult = {
@@ -271,9 +296,29 @@ export async function probePublicUrl(url: string, timeoutMs = 6_000): Promise<Pu
       headers: { 'user-agent': 'agentcloud-preview-probe' },
     });
     const body = await res.text().catch(() => '');
-    return evaluatePublicProbe(res.status, body.slice(0, 4_000));
+    // Halaman error dev server (mis. "Failed to compile") bisa panjang; potongannya
+    // diperbesar supaya pesan "Module not found" + nama paketnya ikut terbaca.
+    return evaluatePublicProbe(res.status, body.slice(0, 16_000));
   } catch {
     return evaluatePublicProbe(0, '');
+  }
+}
+
+/**
+ * Tebak package manager dari lockfile di folder proyek.
+ * Dipakai HANYA saat menyusun saran perintah perbaikan (jarang), jadi satu
+ * perintah shell sudah cukup.
+ */
+export async function detectPackageManager(sandbox: Sandbox, cwd: string): Promise<PackageManager> {
+  try {
+    const res = await runCommand(
+      sandbox,
+      'for f in pnpm-lock.yaml yarn.lock bun.lockb bun.lock package-lock.json; do [ -f "$f" ] && echo "$f"; done',
+      { cwd, timeoutMs: 20_000 },
+    );
+    return packageManagerFromLockfile((res.stdout || '').split('\n'));
+  } catch {
+    return 'npm';
   }
 }
 
@@ -322,6 +367,8 @@ export type StartServerOutcome = {
   localCode: string;
   listenScope: ListenScope;
   publicStatus: string;
+  /** Halaman error kompilasi (mis. modul belum terpasang) yang menghalangi preview. */
+  issue?: PreviewIssue | null;
 };
 
 type LaunchAttempt = {
@@ -416,10 +463,18 @@ export async function startServer(
     }
   }
 
+  // Paket manager hanya perlu dideteksi kalau ada masalah paket yang hilang —
+  // supaya tidak menambah perintah shell pada jalur normal.
+  const probeIssue =
+    attempt.publicProbe.issue ??
+    detectPreviewIssue({ status: Number(attempt.publicProbe.status), log: attempt.logs });
+  const packageManager = probeIssue?.packages.length ? await detectPackageManager(sandbox, cwd) : undefined;
+
   const decision = decideServerReadiness({
     localCode: attempt.localCode,
     listenScope: attempt.listenScope,
     publicProbe: attempt.publicProbe,
+    packageManager,
   });
 
   /**
@@ -429,7 +484,7 @@ export async function startServer(
    * mengulanginya dari nol (penyebab preview tampak "selalu rusak").
    */
   const stillStarting =
-    !decision.ready && attempt.readiness.state === 'timeout' && attempt.publicProbe.status === '000';
+    !decision.ready && !decision.issue && attempt.readiness.state === 'timeout' && attempt.publicProbe.status === '000';
   const reason = stillStarting
     ? 'Perintah server sudah dijalankan dan prosesnya masih hidup, tetapi belum mendengarkan di port ini. ' +
       'Server pertama kali di sandbox dingin (unduh dependency + kompilasi) bisa butuh waktu lebih — ' +
@@ -460,6 +515,7 @@ export async function startServer(
     localCode: attempt.localCode,
     listenScope: attempt.listenScope,
     publicStatus: attempt.publicProbe.status,
+    issue: decision.issue ?? null,
   };
 }
 
@@ -472,6 +528,7 @@ export type ReviveOutcome = {
   command: string | null;
   logs: string;
   reason: string | null;
+  issue?: PreviewIssue | null;
 };
 
 /**
@@ -506,6 +563,7 @@ export async function reviveServer(
     command: started.command,
     logs: started.logs,
     reason: started.reason,
+    issue: started.issue ?? null,
   };
 }
 
@@ -532,6 +590,150 @@ export async function stopServer(sandbox: Sandbox, port: number): Promise<boolea
 
 export function previewAddress(sandbox: Sandbox, port: number): string {
   return `https://${sandbox.getHost(port)}`;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Deploy ke Vercel (link permanen, bukan sandbox)                             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Pastikan CLI Vercel tersedia di sandbox (sekali per sandbox, ditandai penanda
+ * yang bertahan saat sandbox di-pause).
+ *
+ * Instalasinya ringan (npx mengunduh paketnya), jadi penanda ini terutama
+ * berguna agar tidak mengunduh ulang setiap kali user menekan Deploy.
+ */
+export async function ensureVercel(
+  sandbox: Sandbox,
+  onOutput?: (text: string) => void,
+): Promise<{ ok: boolean; message: string }> {
+  const script = `
+set -u
+MARKER=${VERCEL_MARKER}
+if [ -f "$MARKER" ] && npx --yes vercel@latest --version >/dev/null 2>&1; then
+  echo "__AC_VERCEL_READY__ penanda $(npx --yes vercel@latest --version 2>/dev/null | head -1)"
+  exit 0
+fi
+echo "Menyiapkan Vercel CLI (sekali per sandbox)..."
+if npx --yes vercel@latest --version >/dev/null 2>&1; then
+  mkdir -p "$(dirname "$MARKER")" 2>/dev/null || true
+  touch "$MARKER" 2>/dev/null || true
+  echo "__AC_VERCEL_READY__ baru"
+  exit 0
+fi
+echo "__AC_VERCEL_FAIL__ CLI Vercel tidak bisa dijalankan di sandbox ini"
+exit 1
+`.trim();
+
+  const res = await runCommand(sandbox, script, { cwd: '/', timeoutMs: 240_000 }).catch((err) => ({
+    ok: false,
+    stdout: '',
+    stderr: err instanceof Error ? err.message : String(err),
+    exitCode: null,
+  }));
+  const out = `${res.stdout}\n${res.stderr}`.trim();
+  onOutput?.(out);
+
+  // Sama seperti ensureBrowser: kesiapan ditentukan token eksplisit, bukan exit code.
+  if (out.includes('__AC_VERCEL_READY__')) {
+    return { ok: true, message: out.includes('penanda') ? 'Vercel CLI siap (penanda)' : 'Vercel CLI siap' };
+  }
+  const reason = out.match(/__AC_VERCEL_FAIL__\s*(.*)/)?.[1]?.trim();
+  return {
+    ok: false,
+    message: reason ? `Vercel CLI gagal disiapkan: ${reason}` : 'Vercel CLI belum siap — coba Deploy lagi.',
+  };
+}
+
+export type DeployOutcome = {
+  state: DeployState;
+  url: string | null;
+  log: string;
+  error: string | null;
+  /** Perintah yang dijalankan (tanpa token). */
+  command: string;
+  /** true = deploy masih berjalan saat batas tunggu request tercapai. */
+  timedOut: boolean;
+};
+
+/**
+ * Deploy folder proyek ke akun Vercel user dan kembalikan link permanennya.
+ *
+ * Dijalankan sebagai proses LATAR di sandbox dengan keluaran ke file log:
+ * deploy bisa lebih lama daripada batas durasi satu request hosting, dan dengan
+ * cara ini prosesnya tidak ikut terbunuh — pemanggilan berikutnya cukup
+ * MELANJUTKAN membaca log yang sama (lihat `timedOut`).
+ */
+export async function deployToVercel(
+  sandbox: Sandbox,
+  options: {
+    token: string;
+    scope?: string;
+    cwd?: string;
+    projectName?: string;
+    /** Anggaran waktu menunggu di dalam satu request (ms). */
+    waitMs?: number;
+    onOutput?: (text: string) => void;
+  },
+): Promise<DeployOutcome> {
+  const token = (options.token || '').trim();
+  if (!token) {
+    return {
+      state: 'failed',
+      url: null,
+      log: '',
+      error: 'Token Vercel belum diisi. Buka Settings lalu tempel token dari vercel.com/account/tokens.',
+      command: '',
+      timedOut: false,
+    };
+  }
+
+  const cwd = options.cwd || SANDBOX_PROJECT_DIR;
+  const projectName = options.projectName || '';
+  const command = buildDeployCommand({ projectName, scope: options.scope });
+  const shell = deployShellCommand(command);
+
+  // Log lama dibuang supaya status yang dibaca jelas milik deploy ini.
+  await runCommand(sandbox, `: > ${DEPLOY_LOG_PATH}`, { cwd: '/', timeoutMs: 15_000 }).catch(() => undefined);
+
+  // Token dikirim lewat envs (bukan argumen) supaya tidak muncul di daftar
+  // argumen proses maupun di log yang ditampilkan.
+  await sandbox.commands.run(shell, {
+    background: true,
+    cwd,
+    envs: { VERCEL_TOKEN: token },
+  });
+
+  const budget = Math.max(5_000, Math.min(options.waitMs ?? 120_000, DEPLOY_TIMEOUT_MS));
+  const deadline = Date.now() + budget;
+  let status: DeployStatus = { state: 'running', url: null, urls: [], error: null };
+  let log = '';
+
+  for (;;) {
+    await new Promise((resolve) => setTimeout(resolve, DEPLOY_POLL_MS));
+    log = await sandbox.files.read(DEPLOY_LOG_PATH).then(
+      (value) => redactSecrets(String(value ?? ''), token),
+      () => log,
+    );
+    status = parseDeployStatus(log, { token, projectName });
+    options.onOutput?.(redactSecrets(redactTail(log), token));
+    if (status.state !== 'running' || Date.now() >= deadline) break;
+  }
+
+  return {
+    state: status.state,
+    url: status.url,
+    log: redactSecrets(log, token),
+    error: status.error ? explainDeployError(status.error) : null,
+    command,
+    timedOut: status.state === 'running',
+  };
+}
+
+/** Ambil beberapa baris terakhir log (untuk dipancarkan ke UI secara live). */
+function redactTail(log: string, lines = 6): string {
+  const all = (log || '').split('\n').filter((line) => line.trim());
+  return all.slice(-lines).join('\n');
 }
 
 /* -------------------------------------------------------------------------- */
@@ -827,6 +1029,25 @@ export const TOOL_DEFINITIONS = [
       },
     },
   },
+  {
+    type: 'function' as const,
+    function: {
+      name: 'deploy',
+      description:
+        'Deploy proyek ke akun Vercel MILIK USER dan dapatkan LINK PERMANEN (mis. https://nama-proyek.vercel.app) yang tetap hidup walaupun sandbox dimatikan. Panggil HANYA kalau user memintanya secara eksplisit (mis. "deploy", "publish ke Vercel", "kasih link permanen") — jangan deploy sendiri tanpa diminta. Token Vercel diambil otomatis dari Settings aplikasi; kamu tidak perlu (dan tidak boleh) menulis token di argumen. Kalau user belum mengisi token, hasil tool akan menjelaskan bahwa token harus diisi di Settings. Deploy bisa memakan beberapa menit (Vercel membangun di sisi mereka); kalau hasilnya menyatakan masih berjalan, panggil tool ini sekali lagi untuk melanjutkan.',
+      parameters: {
+        type: 'object',
+        properties: {
+          cwd: {
+            type: 'string',
+            description:
+              'Direktori proyek yang dideploy, relatif terhadap folder proyek. WAJIB diisi bila aplikasi ada di sub-folder (mis. "kasir-app").',
+          },
+          prod: { type: 'boolean', description: 'Deploy ke produksi (default true).' },
+        },
+      },
+    },
+  },
 ];
 
 /* -------------------------------------------------------------------------- */
@@ -898,9 +1119,12 @@ export async function executeTool(ctx: ToolContext, name: string, rawArgs: Recor
             `status: ${
               res.ready
                 ? 'SIAP - URL publik sudah melayani aplikasi user'
-                : 'BELUM SIAP - jangan katakan preview siap ke user'
+                : res.issue
+                  ? 'BELUM SIAP - URL publik menampilkan HALAMAN ERROR, bukan aplikasi user'
+                  : 'BELUM SIAP - jangan katakan preview siap ke user'
             }`,
             res.reason ? `masalah: ${res.reason}` : '',
+            res.issue?.fixCommand ? `perbaikan: jalankan \`${res.issue.fixCommand}\` lalu panggil start_server lagi` : '',
             res.warning ? `catatan: ${res.warning}` : '',
             res.logs ? `logs:\n${truncate(res.logs, 3_000)}` : 'logs: (kosong)',
           ]
@@ -930,7 +1154,10 @@ export async function executeTool(ctx: ToolContext, name: string, rawArgs: Recor
         const url = previewAddress(ctx.sandbox, port);
         const local = await probeLocalPort(ctx.sandbox, port);
         const publicProbe = await probePublicUrl(url);
-        const decision = decideServerReadiness({ localCode: local.code, listenScope: local.scope, publicProbe });
+        const packageManager = publicProbe.issue?.packages.length
+          ? await detectPackageManager(ctx.sandbox, SANDBOX_PROJECT_DIR)
+          : undefined;
+        const decision = decideServerReadiness({ localCode: local.code, listenScope: local.scope, publicProbe, packageManager });
         return {
           ok: decision.ready,
           output: [
@@ -938,6 +1165,7 @@ export async function executeTool(ctx: ToolContext, name: string, rawArgs: Recor
             `http_lokal: ${local.code}  |  bind: ${local.scope}  |  url_publik: ${publicProbe.status}`,
             `status: ${decision.ready ? 'SIAP dipakai user' : 'BELUM SIAP'}`,
             decision.reason ? `masalah: ${decision.reason}` : '',
+            decision.issue?.fixCommand ? `perbaikan: jalankan \`${decision.issue.fixCommand}\`` : '',
             decision.warning ? `catatan: ${decision.warning}` : '',
           ]
             .filter(Boolean)
@@ -945,6 +1173,47 @@ export async function executeTool(ctx: ToolContext, name: string, rawArgs: Recor
           previewUrl: url,
           port,
         };
+      }
+
+      case 'deploy': {
+        const deployCfg = ctx.deploy;
+        if (!deployCfg?.token) {
+          return {
+            ok: false,
+            output:
+              'Token Vercel belum diisi, jadi deploy tidak bisa dijalankan. Sampaikan ke user: buka Settings (ikon gerigi) lalu tempel token dari vercel.com/account/tokens ' +
+              'di kolom "Token deploy Vercel" (atau isi variabel environment VERCEL_TOKEN di hosting). Setelah itu minta saya deploy lagi.',
+          };
+        }
+        const cwd = args.cwd ? resolvePath(String(args.cwd)) : SANDBOX_PROJECT_DIR;
+        const prod = args.prod !== false;
+        const projectName = deployCfg.projectName || '';
+
+        const cli = await ensureVercel(ctx.sandbox, ctx.onOutput);
+        if (!cli.ok) return { ok: false, output: cli.message };
+
+        const outcome = await deployToVercel(ctx.sandbox, {
+          token: deployCfg.token,
+          scope: deployCfg.scope,
+          cwd,
+          projectName,
+          waitMs: 150_000,
+          onOutput: ctx.onOutput,
+        });
+
+        const lines = [
+          `deploy_status: ${outcome.state}${outcome.timedOut ? ' (masih berjalan)' : ''}`,
+          `cwd: ${relPath(cwd, SANDBOX_PROJECT_DIR) || '.'}`,
+          outcome.url ? `link_permanen: ${outcome.url}` : '',
+          outcome.state === 'done'
+            ? 'status: SELESAI - link ini permanen dan tetap hidup walau sandbox dimatikan'
+            : outcome.state === 'failed'
+              ? `masalah: ${outcome.error ?? 'deploy gagal'}`
+              : 'status: BELUM SELESAI - panggil tool deploy sekali lagi untuk melanjutkan (deploy tetap berjalan di sandbox)',
+          outcome.log ? `logs:\n${truncate(outcome.log, 2_500)}` : '',
+        ].filter(Boolean);
+
+        return { ok: outcome.state === 'done', output: lines.join('\n'), previewUrl: outcome.url ?? undefined };
       }
 
       default:

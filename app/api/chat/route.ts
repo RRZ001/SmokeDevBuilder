@@ -8,7 +8,7 @@ import { getStore } from '@/lib/db';
 import { restoreProjectFiles, snapshotProjectFiles, summarizeSnapshot } from '@/lib/project-files';
 import type { Block } from '@/lib/db/types';
 import { ensureRuntime, getSandbox, hasE2bKey } from '@/lib/sandbox/manager';
-import { effectiveApiKey, effectiveModel, owner } from '@/lib/session';
+import { effectiveApiKey, effectiveModel, effectiveVercel, owner } from '@/lib/session';
 
 export const dynamic = 'force-dynamic';
 // Catatan durasi: batas waktu fungsi diatur oleh platform hosting, bukan di sini.
@@ -83,6 +83,11 @@ export async function POST(request: Request) {
     let sandboxId = project.sandbox_id;
     let toolCtx: { sandbox: Sandbox; sandboxId: string } | null = null;
 
+    // Kredensial deploy dibaca server-side dan disuntikkan ke tool `deploy`.
+    // Agent tidak pernah melihat tokennya (lihat ToolContext.deploy).
+    const vercel = await effectiveVercel(store, ownerId);
+    const deployCtx = { token: vercel.token, scope: vercel.scope, projectName: project.name };
+
     // Blok pesan assistant. Dideklarasikan SEBELUM cabang E2B di bawah karena
     // notice dari cabang itu ikut disimpan ke riwayat (kalau dideklarasikan
     // setelahnya, `blocks` belum terinisialisasi → ReferenceError/TDZ).
@@ -155,13 +160,38 @@ export async function POST(request: Request) {
 
     send({ type: 'mode', mode });
 
-    const generator = runAgent({ apiKey, model, history, userText, toolCtx, autoDebug, signal, mode, sessionId: projectId });
+    const generator = runAgent({
+      apiKey,
+      model,
+      history,
+      userText,
+      toolCtx: toolCtx ? { ...toolCtx, deploy: deployCtx } : toolCtx,
+      autoDebug,
+      signal,
+      mode,
+      sessionId: projectId,
+    });
     for await (const event of generator as AsyncGenerator<AgentEvent>) {
       if (event.type === 'done') {
         blocks.push(...event.blocks);
         finalText = event.content;
       }
       send(event);
+    }
+
+    // Kalau agent menjalankan tool `deploy` dan berhasil, simpan link permanennya
+    // di proyek supaya tetap tampil setelah reload (dan tetap hidup walau sandbox
+    // dimatikan - inilah bedanya dengan preview sandbox).
+    const deployed = blocks.find(
+      (block): block is Extract<Block, { type: 'tool' }> =>
+        block.type === 'tool' && block.name === 'deploy' && block.status === 'ok' && Boolean(block.previewUrl),
+    );
+    if (deployed?.previewUrl) {
+      await store.updateProject(ownerId, projectId, {
+        deploy_url: deployed.previewUrl,
+        deploy_at: new Date().toISOString(),
+      });
+      send({ type: 'project', project: { ...project, deploy_url: deployed.previewUrl, deploy_at: new Date().toISOString() } });
     }
 
     const saved = await store.addMessage({

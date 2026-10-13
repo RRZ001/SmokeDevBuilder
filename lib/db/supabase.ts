@@ -77,6 +77,8 @@ export class SupabaseStore implements Store {
       owner_id: ownerId,
       openrouter_api_key: patch.openrouter_api_key ?? current?.openrouter_api_key ?? '',
       model: patch.model ?? current?.model ?? '',
+      vercel_token: patch.vercel_token ?? current?.vercel_token ?? '',
+      vercel_scope: patch.vercel_scope ?? current?.vercel_scope ?? '',
       updated_at: new Date().toISOString(),
     };
     await this.run('saveSettings', async () => {
@@ -115,6 +117,8 @@ export class SupabaseStore implements Store {
       description: (input.description ?? '').trim(),
       sandbox_id: null,
       preview_port: null,
+      deploy_url: null,
+      deploy_at: null,
       created_at: now,
       updated_at: now,
     };
@@ -137,6 +141,8 @@ export class SupabaseStore implements Store {
           description: next.description,
           sandbox_id: next.sandbox_id,
           preview_port: next.preview_port,
+          deploy_url: next.deploy_url,
+          deploy_at: next.deploy_at,
           updated_at: next.updated_at,
         })
         .eq('id', id)
@@ -308,6 +314,8 @@ function rowToSettings(row: Row): Settings {
     owner_id: String(row.owner_id),
     openrouter_api_key: String(row.openrouter_api_key ?? ''),
     model: String(row.model ?? ''),
+    vercel_token: String(row.vercel_token ?? ''),
+    vercel_scope: String(row.vercel_scope ?? ''),
     updated_at: String(row.updated_at),
   };
 }
@@ -320,6 +328,8 @@ function rowToProject(row: Row): Project {
     description: String(row.description ?? ''),
     sandbox_id: row.sandbox_id ? String(row.sandbox_id) : null,
     preview_port: row.preview_port == null ? null : Number(row.preview_port),
+    deploy_url: row.deploy_url ? String(row.deploy_url) : null,
+    deploy_at: row.deploy_at ? String(row.deploy_at) : null,
     created_at: String(row.created_at),
     updated_at: String(row.updated_at),
   };

@@ -141,6 +141,15 @@ export const DotIcon = (p: IconProps) => (
   </Svg>
 );
 
+/** Ikon deploy: panah naik keluar dari awan (link permanen ke hosting). */
+export const CloudDeployIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M16.5 16.5a4 4 0 0 0 .3-7.99A5 5 0 0 0 7.4 7.6 3.5 3.5 0 0 0 7 14.5" />
+    <path d="M12 21V12" />
+    <path d="m8.5 15.5 3.5-3.5 3.5 3.5" />
+  </Svg>
+);
+
 export const CopyIcon = (p: IconProps) => (
   <Svg {...p}>
     <rect x="9" y="9" width="11" height="11" rx="2" />

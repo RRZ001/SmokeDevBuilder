@@ -28,6 +28,7 @@ const DEFAULT_SETTINGS: BootstrapResponse['settings'] = {
   keySource: 'none',
   keyPreview: '',
   updatedAt: null,
+  vercel: { hasToken: false, tokenPreview: '', tokenSource: 'none', scope: '' },
 };
 
 const DEFAULT_CAPS: BootstrapResponse['capabilities'] = {
@@ -78,6 +79,8 @@ export default function Workspace() {
   const [terminalLines, setTerminalLines] = useState<TerminalLine[]>([]);
   const [terminalRunning, setTerminalRunning] = useState(false);
   const [sandboxBusy, setSandboxBusy] = useState(false);
+  const [deploying, setDeploying] = useState(false);
+  const [deployNote, setDeployNote] = useState<string | null>(null);
   const [preview, setPreview] = useState<PreviewState>({
     url: null,
     port: 3000,
@@ -86,6 +89,7 @@ export default function Workspace() {
     loading: false,
     reason: null,
     pending: false,
+    issue: null,
   });
 
   const abortRef = useRef<AbortController | null>(null);
@@ -232,6 +236,7 @@ export default function Workspace() {
           restarted?: boolean;
           proxyError?: boolean;
           pending?: boolean;
+          issue?: PreviewState['issue'];
           reason?: string | null;
         }>(`/api/projects/${id}/sandbox/preview`);
         setPreview((p) => ({
@@ -246,6 +251,7 @@ export default function Workspace() {
           restarted: Boolean(data.restarted),
           proxyError: Boolean(data.proxyError),
           pending: Boolean(data.pending),
+          issue: data.issue ?? null,
         }));
       } catch (err) {
         setPreview((p) => ({
@@ -254,6 +260,7 @@ export default function Workspace() {
           online: false,
           status: '000',
           pending: false,
+          issue: null,
           reason: err instanceof Error ? err.message : String(err),
         }));
       }
@@ -338,7 +345,7 @@ export default function Workspace() {
     setLive(null);
     const project = projects.find((p) => p.id === activeId);
     setSandboxId(project?.sandbox_id ?? null);
-    setPreview((p) => ({ ...p, port: project?.preview_port ?? p.port, online: false, url: null, status: '000', pending: false }));
+    setPreview((p) => ({ ...p, port: project?.preview_port ?? p.port, online: false, url: null, status: '000', pending: false, issue: null }));
     void loadMessages(activeId);
     void refreshFiles(activeId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -487,6 +494,7 @@ export default function Workspace() {
                 restarted: false,
                 proxyError: false,
                 pending: true,
+                issue: null,
               }));
               void apiJson(`/api/projects/${activeId}/sandbox/preview`, {
                 method: 'POST',
@@ -780,6 +788,7 @@ export default function Workspace() {
         restarted?: boolean;
         proxyError?: boolean;
         pending?: boolean;
+        issue?: PreviewState['issue'];
         reason?: string | null;
         startedCommand?: string | null;
       }>(`/api/projects/${activeId}/sandbox/preview`, {
@@ -798,6 +807,7 @@ export default function Workspace() {
         restarted: Boolean(data.restarted),
         proxyError: Boolean(data.proxyError),
         pending: Boolean(data.pending),
+        issue: data.issue ?? null,
       }));
       pushLine(
         data.online ? 'info' : 'error',
@@ -810,6 +820,54 @@ export default function Workspace() {
       pushLine('error', `Gagal menjalankan ulang dev server: ${err instanceof Error ? err.message : String(err)}`);
     }
   }, [activeId, preview.port, pushLine]);
+
+  /**
+   * Deploy proyek ke akun Vercel user → link PERMANEN yang tetap hidup walaupun
+   * sandbox dimatikan (user memilih: deploy hanya saat diminta).
+   *
+   * Log deploy di-stream ke tab Terminal supaya prosesnya terlihat, dan link
+   * hasilnya disimpan di proyek (bertahan setelah reload).
+   */
+  const deployProject = useCallback(async () => {
+    if (!activeId || deploying) return;
+    setDeploying(true);
+    setDeployNote('Menjalankan deploy…');
+    setMobileView('code');
+    setTab('terminal');
+    pushLine('info', '— deploy ke Vercel —');
+    try {
+      for await (const event of streamNdjson(`/api/projects/${activeId}/deploy`, {
+        cwd: undefined,
+        projectName: activeProject?.name,
+      })) {
+        if (event.type === 'log') {
+          const value = String(event.value ?? '').trim();
+          if (value) pushLine('output', value);
+        } else if (event.type === 'deploy_url') {
+          const url = String(event.url);
+          const at = String(event.deployAt ?? new Date().toISOString());
+          setDeployNote(null);
+          setProjects((prev) => prev.map((p) => (p.id === activeId ? { ...p, deploy_url: url, deploy_at: at } : p)));
+          pushLine('info', `Selesai! Link permanen: ${url}`);
+        } else if (event.type === 'deploy_pending') {
+          setDeployNote(String(event.message ?? 'Deploy masih berjalan di Vercel.'));
+          pushLine('info', String(event.message ?? ''));
+        } else if (event.type === 'deploy_error') {
+          const message = String(event.message ?? 'Deploy gagal.');
+          setDeployNote(message);
+          pushLine('error', message);
+        } else if (event.type === 'error') {
+          pushLine('error', String(event.message));
+        }
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setDeployNote(message);
+      pushLine('error', `Deploy gagal: ${message}`);
+    } finally {
+      setDeploying(false);
+    }
+  }, [activeId, activeProject?.name, deploying, pushLine]);
 
   const storageLabel = useMemo(() => {
     const storage = capabilities.storage;
@@ -948,6 +1006,13 @@ export default function Workspace() {
             onRefreshPreview={() => void refreshPreview()}
             onRestartPreview={() => void restartPreview()}
             onSetPort={setPreviewPort}
+            onAskFixPreview={(message) => void handleSend(message)}
+            deployUrl={activeProject?.deploy_url ?? null}
+            deployAt={activeProject?.deploy_at ?? null}
+            deployAvailable={Boolean(settings.vercel?.hasToken)}
+            deploying={deploying}
+            deployNote={deployNote}
+            onDeploy={() => void deployProject()}
             activeTab={tab}
             onTabChange={setTab}
           />

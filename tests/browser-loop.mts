@@ -105,7 +105,8 @@ console.log('\n[1] tool terdaftar untuk model');
   check('deskripsi menyuruh memakai sebelum klaim selesai', /WAJIB dipakai sebelum mengklaim/i.test(description));
   check('deskripsi menyebut viewport mobile & desktop', /mobile/.test(description) && /desktop/.test(description));
   check('parameter viewport berupa enum', JSON.stringify(def.function.parameters).includes('"enum"'));
-  check('jumlah tool menjadi 8', names.length === 8, String(names.length));
+  // 9 sejak tool `deploy` (lihat tests/vercel-deploy.mts) ditambahkan.
+  check('jumlah tool menjadi 9', names.length === 9, String(names.length));
 }
 
 console.log('\n[2] install browser sekali saja (penanda)');

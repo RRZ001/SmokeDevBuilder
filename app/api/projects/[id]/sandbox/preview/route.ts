@@ -17,6 +17,7 @@ import {
   readServerRegistry,
   reviveServer,
 } from '@/lib/sandbox/tools';
+import { detectPreviewIssue } from '@/lib/sandbox/diagnostics';
 import { owner } from '@/lib/session';
 
 export const dynamic = 'force-dynamic';
@@ -85,6 +86,7 @@ async function inspect(sandbox: Sandbox, port: number, allowRevive: boolean): Pr
 
   const records = await readServerRegistry(sandbox);
   const record = records.find((r) => r.port === port);
+  const currentIssue = publicProbe.issue ?? detectPreviewIssue({ status: Number(publicProbe.status) });
   const plan = planPreviewRecovery({
     publicOnline: publicProbe.online,
     localCode: local.code,
@@ -92,6 +94,7 @@ async function inspect(sandbox: Sandbox, port: number, allowRevive: boolean): Pr
     hasServerRecord: Boolean(record),
     sinceLaunchMs: record ? Date.now() - record.startedAt : null,
     sinceReadyMs: record?.readyAt ? Date.now() - record.readyAt : null,
+    issue: currentIssue,
   });
 
   let restarted = false;
@@ -109,14 +112,21 @@ async function inspect(sandbox: Sandbox, port: number, allowRevive: boolean): Pr
         startedCommand = outcome.command;
         local = await probeLocalPort(sandbox, port);
         publicProbe = await probePublicUrl(url);
-        reason = publicProbe.online ? null : (outcome.reason ?? plan.reason);
+        // Server hidup tapi halamannya error kompilasi (mis. modul belum terpasang):
+        // menjalankan ulang tidak menolong — laporkan masalahnya apa adanya.
+        const revivedIssue = publicProbe.issue ?? null;
+        if (revivedIssue) {
+          reason = outcome.reason ?? plan.reason;
+        } else {
+          reason = publicProbe.online ? null : (outcome.reason ?? plan.reason);
+        }
         if (!publicProbe.online) {
           // Server baru saja dijalankan: beri waktu sebentar di request yang sama
           // (sisanya ditangani polling berikutnya).
           const settled = await waitForOnline(url, 15_000);
           if (settled.online) {
             publicProbe = settled;
-            reason = null;
+            reason = settled.issue ? reason : null;
           }
         }
       }
@@ -139,8 +149,8 @@ async function inspect(sandbox: Sandbox, port: number, allowRevive: boolean): Pr
 
   // Catat peluncuran ini sudah terbukti siap: pemulihan berikutnya (kalau
   // sandbox di-pause dan prosesnya hilang) boleh langsung menjalankan ulang,
-  // tanpa menunggu masa tenggang.
-  if (publicProbe.online) await markServerReady(sandbox, port);
+  // tanpa menunggu masa tenggang. Halaman error kompilasi TIDAK dihitung siap.
+  if (publicProbe.online && !publicProbe.issue) await markServerReady(sandbox, port);
 
   return {
     url,
@@ -154,6 +164,7 @@ async function inspect(sandbox: Sandbox, port: number, allowRevive: boolean): Pr
     startedCommand,
     reason,
     pending,
+    issue: publicProbe.issue ?? null,
   };
 }
 

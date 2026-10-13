@@ -2,7 +2,7 @@ import { fail, ok, errorResponse, readJson } from '@/lib/api';
 import { OPENROUTER_BASE_URL } from '@/lib/config';
 import { getStore } from '@/lib/db';
 import { modelLabel } from '@/lib/models';
-import { effectiveApiKey, effectiveModel, owner, serializeSettings } from '@/lib/session';
+import { effectiveApiKey, effectiveModel, effectiveVercel, owner, serializeSettings } from '@/lib/session';
 
 export const dynamic = 'force-dynamic';
 
@@ -23,7 +23,10 @@ export async function GET() {
 type Body = {
   openrouter_api_key?: string;
   model?: string;
-  action?: 'save' | 'test';
+  /** Token deploy Vercel. String kosong = hapus token yang tersimpan. */
+  vercel_token?: string;
+  vercel_scope?: string;
+  action?: 'save' | 'test' | 'test-vercel';
 };
 
 export async function POST(request: Request) {
@@ -31,6 +34,38 @@ export async function POST(request: Request) {
     const ownerId = await owner();
     const body = await readJson<Body>(request);
     const { store } = await getStore();
+
+    if (body.action === 'test-vercel') {
+      const existing = await store.getSettings(ownerId);
+      const token = (body.vercel_token || '').trim() || (await effectiveVercel(store, ownerId)).token;
+      if (!token) return fail('Token Vercel belum diisi.', 400);
+      const started = Date.now();
+      try {
+        const res = await fetch('https://api.vercel.com/v2/user', {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const text = await res.text();
+        if (!res.ok) {
+          return ok({
+            ok: false,
+            latencyMs: Date.now() - started,
+            message:
+              res.status === 403 || res.status === 401
+                ? 'Token ditolak Vercel (tidak valid atau sudah dicabut). Buat token baru di vercel.com/account/tokens.'
+                : `Vercel menolak (${res.status}): ${text.slice(0, 200)}`,
+          });
+        }
+        const json = JSON.parse(text) as { user?: { username?: string; email?: string } };
+        const who = json.user?.username || json.user?.email || 'akun Vercel';
+        return ok({ ok: true, latencyMs: Date.now() - started, message: `Token valid — terhubung sebagai ${who}.` });
+      } catch (err) {
+        return ok({
+          ok: false,
+          latencyMs: Date.now() - started,
+          message: `Gagal menghubungi Vercel: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+    }
 
     if (body.action === 'test') {
       const existing = await store.getSettings(ownerId);
@@ -74,12 +109,25 @@ export async function POST(request: Request) {
       }
     }
 
-    const patch: { openrouter_api_key?: string; model?: string } = {};
+    const patch: {
+      openrouter_api_key?: string;
+      model?: string;
+      vercel_token?: string;
+      vercel_scope?: string;
+    } = {};
     if (typeof body.openrouter_api_key === 'string') {
       patch.openrouter_api_key = body.openrouter_api_key.trim();
     }
     if (typeof body.model === 'string' && body.model.trim()) {
       patch.model = body.model.trim();
+    }
+    // Token Vercel: hanya ditulis kalau dikirim (string kosong = hapus). Tidak
+    // pernah dikembalikan ke klien — serializeSettings hanya memberi cuplikan.
+    if (typeof body.vercel_token === 'string') {
+      patch.vercel_token = body.vercel_token.trim();
+    }
+    if (typeof body.vercel_scope === 'string') {
+      patch.vercel_scope = body.vercel_scope.trim();
     }
     if (!Object.keys(patch).length) return fail('Tidak ada perubahan yang dikirim.', 400);
 
