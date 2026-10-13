@@ -1,6 +1,6 @@
 import type { Sandbox } from '@e2b/code-interpreter';
 import { ndjsonStream, readJson } from '@/lib/api';
-import { buildDeployCommand } from '@/lib/deploy/vercel';
+import { buildDeployCommand, deploymentProtectionSettingsUrl } from '@/lib/deploy/vercel';
 import { getStore } from '@/lib/db';
 import { loadProject } from '@/lib/projects';
 import { getSandbox, hasE2bKey } from '@/lib/sandbox/manager';
@@ -114,6 +114,18 @@ export async function POST(request: Request, ctx: Ctx) {
       if (outcome.state === 'done' && outcome.url) {
         await store.updateProject(ownerId, id, { deploy_url: outcome.url, deploy_at: new Date().toISOString() });
         send({ type: 'deploy_url', url: outcome.url, deployAt: new Date().toISOString() });
+        // Link yang terkunci Deployment Protection terlihat "sukses" di log,
+        // padahal pengunjung hanya melihat halaman login/404 Vercel. Beri tahu
+        // user terang-terangan + sediakan tombol mematikannya di panel Preview.
+        if (outcome.protected) {
+          send({
+            type: 'deploy_protected',
+            url: outcome.url,
+            projectName,
+            message: outcome.protectionNote ?? null,
+            settingsUrl: deploymentProtectionSettingsUrl({ projectName, scope: vercel.scope }),
+          });
+        }
       } else if (outcome.timedOut) {
         send({
           type: 'deploy_pending',

@@ -74,6 +74,12 @@ type Props = {
   deploying: boolean;
   deployNote: string | null;
   onDeploy: () => void;
+  /** Link deploy terkunci Deployment Protection (Vercel Authentication). */
+  deployProtected: boolean;
+  deployProtectionNote: string | null;
+  deploySettingsUrl: string | null;
+  disablingProtection: boolean;
+  onDisableProtection: () => void;
   activeTab: Tab;
   onTabChange: (tab: Tab) => void;
 };
@@ -232,6 +238,11 @@ export default function CodePanel(props: Props) {
           deploying={props.deploying}
           deployNote={props.deployNote}
           onDeploy={props.onDeploy}
+          deployProtected={props.deployProtected}
+          deployProtectionNote={props.deployProtectionNote}
+          deploySettingsUrl={props.deploySettingsUrl}
+          disablingProtection={props.disablingProtection}
+          onDisableProtection={props.onDisableProtection}
           onRefresh={props.onRefreshPreview}
           onRestart={props.onRestartPreview}
           onSetPort={props.onSetPort}

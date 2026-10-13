@@ -195,6 +195,252 @@ export function pickPrimaryUrl(urls: string[], logText = ''): string | null {
   return urls[0] ?? null;
 }
 
+/* -------------------------------------------------------------------------- */
+/* Deployment Protection (Vercel Authentication)                                */
+/* -------------------------------------------------------------------------- */
+
+/** Basis API publik Vercel (dipakai dengan token user, tidak pernah di klien). */
+export const VERCEL_API_BASE = 'https://api.vercel.com';
+
+/** Info proyek Vercel dari API — termasuk alias produksi & status proteksinya. */
+export type VercelProjectInfo = {
+  id: string | null;
+  name: string | null;
+  /**
+   * Alias produksi STABIL milik proyek ini (mis. `sistem-kasir-smoke-dev-builder.vercel.app`),
+   * dibaca dari `targets.production.alias`. Ini bukan tebakan: nilainya berasal
+   * dari catatan proyek user sendiri, jadi aman ditampilkan sebagai link permanen
+   * (berbeda dengan URL ber-hash yang berubah tiap deploy).
+   */
+  productionAliases: string[];
+  /** true = Vercel Authentication (Deployment Protection) aktif untuk proyek ini. */
+  protected: boolean;
+  /** Jenis proteksi dari API (`prod_deployment_urls_and_all_previews` dll). */
+  protectionType: string | null;
+  /** Halaman pengaturan Deployment Protection proyek ini. */
+  settingsUrl: string | null;
+};
+
+/** Parameter `teamId`/slug untuk API Vercel (kosong = akun pribadi). */
+function scopeQuery(scope?: string | null): string {
+  const value = (scope || '').trim();
+  return value ? `?teamId=${encodeURIComponent(value)}` : '';
+}
+
+/**
+ * Permintaan info proyek ke API Vercel (GET) — untuk mengetahui alias produksi
+ * dan apakah proyeknya dikunci Deployment Protection.
+ */
+export function buildProjectInfoRequest(options: { projectName: string; scope?: string | null }): {
+  url: string;
+  method: 'GET';
+} {
+  const name = toVercelProjectName(options.projectName);
+  return {
+    url: `${VERCEL_API_BASE}/v9/projects/${encodeURIComponent(name)}${scopeQuery(options.scope)}`,
+    method: 'GET',
+  };
+}
+
+/**
+ * Permintaan MEMATIKAN Vercel Authentication untuk sebuah proyek.
+ *
+ * Dokumentasi Vercel menyebutkan `ssoProtection: null` = Vercel Authentication
+ * dimatikan, dan mematikannya langsung membuka SEMUA deployment yang sudah ada
+ * (tidak perlu deploy ulang) — inilah sebabnya link user bisa dibuka publik
+ * tanpa menunggu build baru.
+ */
+export function buildDisableProtectionRequest(options: { projectName: string; scope?: string | null }): {
+  url: string;
+  method: 'PATCH';
+  body: string;
+} {
+  const name = toVercelProjectName(options.projectName);
+  return {
+    url: `${VERCEL_API_BASE}/v9/projects/${encodeURIComponent(name)}${scopeQuery(options.scope)}`,
+    method: 'PATCH',
+    body: JSON.stringify({ ssoProtection: null }),
+  };
+}
+
+/** Halaman pengaturan Deployment Protection sebuah proyek Vercel. */
+export function deploymentProtectionSettingsUrl(options: { projectName: string; scope?: string | null }): string {
+  const name = toVercelProjectName(options.projectName);
+  const scope = (options.scope || '').trim();
+  return scope ? `https://vercel.com/${scope}/${name}/settings/deployment-protection` : `https://vercel.com/${name}`;
+}
+
+/** Ambil alias produksi dari objek `targets.production.alias` milik proyek. */
+function productionAliasesFrom(targets: unknown): string[] {
+  const production = (targets as { production?: { alias?: unknown } } | null)?.production;
+  const alias = production?.alias;
+  if (!Array.isArray(alias)) return [];
+  const hosts = alias
+    .filter((value): value is string => typeof value === 'string')
+    .map((value) => value.trim().replace(/^https?:\/\//i, '').replace(/\/.*$/, ''))
+    .filter(Boolean);
+  const unique = [...new Set(hosts)];
+  // Domain `*.vercel.app` didahulukan (pasti milik proyek ini dan selalu aktif);
+  // domain custom ikut sebagai cadangan tanpa mengalahkan yang utama.
+  return unique.sort((a, b) => Number(b.endsWith('.vercel.app')) - Number(a.endsWith('.vercel.app')));
+}
+
+/**
+ * Baca respons GET /v9/projects/{name} jadi info yang dipakai UI.
+ * Mengembalikan null kalau bentuknya tidak dikenali (jangan menebak).
+ */
+export function parseProjectInfo(json: unknown, options: { scope?: string | null } = {}): VercelProjectInfo | null {
+  if (!json || typeof json !== 'object') return null;
+  const obj = json as Record<string, unknown>;
+  const name = typeof obj.name === 'string' ? obj.name : null;
+  if (!name) return null;
+  const sso = obj.ssoProtection;
+  const protectedFlag = Boolean(sso && typeof sso === 'object');
+  const protectionType =
+    sso && typeof sso === 'object' && typeof (sso as { deploymentType?: unknown }).deploymentType === 'string'
+      ? String((sso as { deploymentType: string }).deploymentType)
+      : null;
+  return {
+    id: typeof obj.id === 'string' ? obj.id : null,
+    name,
+    productionAliases: productionAliasesFrom(obj.targets),
+    protected: protectedFlag,
+    protectionType,
+    settingsUrl: deploymentProtectionSettingsUrl({ projectName: name, scope: options.scope }),
+  };
+}
+
+/** Hasil pemeriksaan sebuah link deploy (dari sisi server, redirect tidak diikuti). */
+export type DeployLinkProbe = {
+  /** Status HTTP; 0 = request gagal sama sekali. */
+  status: number;
+  location?: string | null;
+  body?: string | null;
+  setCookie?: string | null;
+  error?: string | null;
+};
+
+export type DeployLinkVerdict = {
+  /** true = pengunjung tanpa sesi Vercel melihat aplikasinya (link layak dibagikan). */
+  public: boolean;
+  /** true = link dikunci Deployment Protection (login Vercel / password). */
+  restricted: boolean;
+  /** Klasifikasi untuk pesan & penanganan. */
+  kind: 'public' | 'redirect' | 'vercel-authentication' | 'restricted' | 'not-found' | 'server-error' | 'unreachable';
+  status: number;
+  reason: string | null;
+};
+
+/**
+ * Nilai apakah sebuah link deploy benar-benar bisa dibuka publik.
+ *
+ * INSIDEN NYATA (Okt 2026): proyek Vercel baru punya **Vercel Authentication
+ * (Deployment Protection)** aktif, sehingga URL deploy menjawab 302 ke
+ * `vercel.com/sso-api` dan pengunjung yang tidak punya sesi Vercel berhak hanya
+ * melihat halaman login/404 — user melaporkannya sebagai "link permanennya error"
+ * padahal build-nya sukses. Deteksi ini yang membedakan "link siap dibagikan"
+ * dari "link hidup tapi terkunci".
+ */
+export function judgeDeployLink(probe: DeployLinkProbe): DeployLinkVerdict {
+  const status = Number.isFinite(probe.status) ? Math.trunc(probe.status) : 0;
+  const location = (probe.location || '').toLowerCase();
+  const body = (probe.body || '').toLowerCase();
+  const cookie = (probe.setCookie || '').toLowerCase();
+
+  if (status === 0) {
+    return {
+      public: false,
+      restricted: false,
+      kind: 'unreachable',
+      status,
+      reason: probe.error || 'Link deploy tidak bisa dihubungi dari server.',
+    };
+  }
+
+  const sso =
+    location.includes('/sso-api') ||
+    location.includes('vercel.com/login') ||
+    body.includes('/sso-api?url=') ||
+    cookie.includes('_vercel_sso_nonce') ||
+    /vercel authentication|authentication required/.test(body);
+  if (sso || status === 401 || status === 403) {
+    return {
+      public: false,
+      restricted: true,
+      kind: sso ? 'vercel-authentication' : 'restricted',
+      status,
+      reason: sso
+        ? 'Deployment Protection (Vercel Authentication) aktif'
+        : 'Link dilindungi password/proteksi Vercel',
+    };
+  }
+
+  if (status >= 200 && status < 300) {
+    return { public: true, restricted: false, kind: 'public', status, reason: null };
+  }
+  if (status >= 300 && status < 400) {
+    return { public: true, restricted: false, kind: 'redirect', status, reason: null };
+  }
+  if (status === 404) {
+    return {
+      public: false,
+      restricted: false,
+      kind: 'not-found',
+      status,
+      reason: /not_found|doesn.t exist/.test(body) ? 'Deployment tidak ditemukan (sudah dihapus?)' : 'Halaman 404',
+    };
+  }
+  return {
+    public: false,
+    restricted: false,
+    kind: 'server-error',
+    status,
+    reason: `Server menjawab HTTP ${status}`,
+  };
+}
+
+/** Pesan siap-tampil saat link dikunci Vercel Authentication. */
+export function vercelAuthenticationNote(options: { projectName?: string; scope?: string | null } = {}): string {
+  const settings = deploymentProtectionSettingsUrl({
+    projectName: options.projectName || 'proyek',
+    scope: options.scope,
+  });
+  return (
+    'Link ini hidup, tapi terkunci Deployment Protection (Vercel Authentication) — pengunjung lain ' +
+    'dibawa ke halaman login Vercel, dan tanpa akun berhak mereka melihat "This page doesn\'t exist" ' +
+    '(persis seperti error yang terlihat). Matikan: Vercel → proyek → Settings → Deployment Protection → Vercel Authentication, ' +
+    `atau lewat tombol "Matikan proteksi" di panel Preview. ${settings}`
+  );
+}
+
+/**
+ * Pesan siap-tampil untuk user saat link deploy terkunci/masalah, plus langkah
+ * perbaikannya. Dipakai UI, log agent, dan tool `deploy`.
+ */
+export function deployLinkNote(
+  verdict: DeployLinkVerdict,
+  options: { projectName?: string; scope?: string | null; url?: string | null } = {},
+): string | null {
+  const settings = deploymentProtectionSettingsUrl({
+    projectName: options.projectName || 'proyek',
+    scope: options.scope,
+  });
+  switch (verdict.kind) {
+    case 'vercel-authentication':
+      return vercelAuthenticationNote(options);
+    case 'restricted':
+      return `Link ini masih dilindungi (password/proteksi Vercel), jadi belum bisa dibuka pengunjung. Periksa Deployment Protection: ${settings}`;
+    case 'not-found':
+      return 'Deployment sudah tidak ada di Vercel (mungkin dihapus atau di-rollback), jadi linknya 404. Jalankan deploy lagi.';
+    case 'server-error':
+      return `Deployment menjawab HTTP ${verdict.status}. Cek log build di dashboard Vercel.`;
+    case 'unreachable':
+      return `Link deploy belum bisa dihubungi dari server${verdict.reason ? ` (${verdict.reason})` : ''}. Coba buka langsung; kalau tetap gagal, deploy ulang.`;
+    default:
+      return null;
+  }
+}
+
 /** Baris error khas CLI Vercel. */
 const ERROR_PATTERNS: RegExp[] = [
   /^Error:/i,

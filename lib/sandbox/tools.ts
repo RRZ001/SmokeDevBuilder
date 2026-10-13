@@ -40,15 +40,23 @@ import {
   DEPLOY_TIMEOUT_MS,
   VERCEL_MARKER,
   buildDeployCommand,
+  buildDisableProtectionRequest,
   buildLinkCommand,
+  buildProjectInfoRequest,
+  deployLinkNote,
   deployShellCommand,
   explainDeployError,
+  judgeDeployLink,
   parseDeployStatus,
   parseProcessAlive,
+  parseProjectInfo,
   processAliveScript,
   redactSecrets,
+  vercelAuthenticationNote,
+  type DeployLinkVerdict,
   type DeployState,
   type DeployStatus,
+  type VercelProjectInfo,
 } from '@/lib/deploy/vercel';
 import { humanSize, joinSandboxPath, normalize, relPath, truncate } from '@/lib/util';
 
@@ -663,7 +671,160 @@ export type DeployOutcome = {
    * package.json) — dipakai menyusun saran perbaikan untuk agent.
    */
   issue?: PreviewIssue | null;
+  /**
+   * true = link hasil deploy TIDAK bisa dibuka pengunjung karena Deployment
+   * Protection (Vercel Authentication) / proteksi lain masih aktif.
+   * INSIDEN NYATA: tanpa penanda ini user diberi "link permanen" yang ternyata
+   * cuma menampilkan halaman login/404 Vercel.
+   */
+  protected?: boolean;
+  /** Penjelasan + cara mematikan proteksinya (siap ditampilkan). */
+  protectionNote?: string | null;
+  /** Alias produksi stabil milik proyek (kalau API Vercel memberikannya). */
+  alias?: string | null;
+  /** Hasil pemeriksaan link dari sisi server (diagnosa). */
+  link?: DeployLinkVerdict | null;
 };
+
+/**
+ * Periksa apakah sebuah link deploy benar-benar bisa dibuka publik.
+ *
+ * Redirect TIDAK diikuti (`redirect: 'manual'`) supaya halaman login Vercel bisa
+ * dikenali sebagai tanda Deployment Protection — kalau diikuti, halaman login itu
+ * menjawab 200 dan link terkunci akan tampak "normal".
+ */
+export async function checkDeployLink(url: string, timeoutMs = 12_000): Promise<DeployLinkVerdict> {
+  const target = (url || '').trim();
+  if (!target) return judgeDeployLink({ status: 0, error: 'Tidak ada link untuk diperiksa.' });
+  try {
+    const res = await fetch(target, {
+      redirect: 'manual',
+      signal: AbortSignal.timeout(timeoutMs),
+      headers: { 'user-agent': 'agentcloud-deploy-check' },
+    });
+    const body = res.status >= 300 ? await res.text().catch(() => '') : '';
+    return judgeDeployLink({
+      status: res.status,
+      location: res.headers.get('location'),
+      setCookie: res.headers.get('set-cookie'),
+      body: body.slice(0, 4_000),
+    });
+  } catch (err) {
+    return judgeDeployLink({ status: 0, error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+/**
+ * Panggil API Vercel dengan token user.
+ *
+ * `scope` (tim/akun) dicoba lebih dulu; kalau gagal, permintaan diulang TANPA
+ * scope — token pribadi tidak menerima `teamId` dan sebaliknya. Token hanya
+ * dikirim di header, tidak pernah masuk URL/log.
+ */
+async function vercelApiRequest(options: {
+  token: string;
+  scope?: string | null;
+  projectName: string;
+  method: 'GET' | 'PATCH';
+  body?: string;
+  timeoutMs?: number;
+}): Promise<{ ok: boolean; status: number; json: unknown; error: string | null }> {
+  const token = (options.token || '').trim();
+  const scope = (options.scope || '').trim();
+  const attempts: Array<string | null> = scope ? [scope, null] : [null];
+  let last = { ok: false, status: 0, json: null as unknown, error: null as string | null };
+
+  for (const attempt of attempts) {
+    const req =
+      options.method === 'GET'
+        ? buildProjectInfoRequest({ projectName: options.projectName, scope: attempt })
+        : buildDisableProtectionRequest({ projectName: options.projectName, scope: attempt });
+    try {
+      const res = await fetch(req.url, {
+        method: req.method,
+        signal: AbortSignal.timeout(options.timeoutMs ?? 15_000),
+        headers: {
+          authorization: `Bearer ${token}`,
+          accept: 'application/json',
+          ...(options.method === 'PATCH' ? { 'content-type': 'application/json' } : {}),
+        },
+        ...(options.body ? { body: options.body } : {}),
+      });
+      const json = res.status === 204 ? null : await res.json().catch(() => null);
+      if (res.ok) return { ok: true, status: res.status, json, error: null };
+      const apiError =
+        json && typeof json === 'object' && typeof (json as { error?: { message?: unknown } }).error?.message === 'string'
+          ? String((json as { error: { message: string } }).error.message)
+          : null;
+      last = { ok: false, status: res.status, json, error: apiError ?? `API Vercel menjawab HTTP ${res.status}` };
+      // 401/403 tidak akan membaik dengan mengganti scope.
+      if (res.status === 401 || res.status === 403) break;
+    } catch (err) {
+      last = { ok: false, status: 0, json: null, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+  return last;
+}
+
+/** Info proyek Vercel (alias produksi + status Deployment Protection). */
+export async function fetchVercelProject(options: {
+  token: string;
+  scope?: string | null;
+  projectName: string;
+  timeoutMs?: number;
+}): Promise<VercelProjectInfo | null> {
+  if (!(options.token || '').trim() || !options.projectName) return null;
+  const res = await vercelApiRequest({
+    token: options.token,
+    scope: options.scope,
+    projectName: options.projectName,
+    method: 'GET',
+  });
+  if (!res.ok) return null;
+  return parseProjectInfo(res.json, { scope: options.scope });
+}
+
+/**
+ * Matikan Vercel Authentication untuk proyek user (dipakai tombol "Matikan
+ * proteksi" dan otomatis saat agent mendeploy). Dokumentasi Vercel: mematikannya
+ * langsung membuka SEMUA deployment yang sudah ada, jadi tidak perlu deploy ulang.
+ */
+export async function disableVercelProtection(options: {
+  token: string;
+  scope?: string | null;
+  projectName: string;
+  timeoutMs?: number;
+}): Promise<{ ok: boolean; message: string; info: VercelProjectInfo | null }> {
+  if (!(options.token || '').trim()) {
+    return { ok: false, message: 'Token Vercel belum diisi.', info: null };
+  }
+  const res = await vercelApiRequest({
+    token: options.token,
+    scope: options.scope,
+    projectName: options.projectName,
+    method: 'PATCH',
+    body: buildDisableProtectionRequest({ projectName: options.projectName, scope: options.scope }).body,
+  });
+  if (!res.ok) {
+    return {
+      ok: false,
+      message:
+        'Gagal mematikan proteksi lewat API Vercel' +
+        (res.error ? `: ${res.error}` : '') +
+        '. Pastikan token punya akses ke proyek ini, atau matikan manual di Vercel → proyek → Settings → Deployment Protection.',
+      info: null,
+    };
+  }
+  const info = parseProjectInfo(res.json, { scope: options.scope });
+  if (info?.protected) {
+    return {
+      ok: false,
+      message: 'Vercel masih melaporkan proteksi aktif untuk proyek ini. Coba matikan manual di dashboard Vercel.',
+      info,
+    };
+  }
+  return { ok: true, message: 'Deployment Protection (Vercel Authentication) dimatikan untuk proyek ini.', info };
+}
 
 /**
  * Deploy folder proyek ke akun Vercel user dan kembalikan link permanennya.
@@ -809,14 +970,61 @@ export async function deployToVercel(
 
   const issue = detectPreviewIssue({ log });
 
+  /**
+   * Link yang ditampilkan + apakah benar-benar bisa dibuka publik.
+   *
+   * Dua hal yang diperiksa SETELAH deploy selesai (keduanya dari sisi server,
+   * tidak pernah dari kata-kata CLI saja):
+   *  1. **Alias produksi stabil** dari API Vercel (`targets.production.alias`) —
+   *     ini milik proyek user sendiri, jadi bukan tebakan seperti kasus lama
+   *     `sistem-kasir.vercel.app` yang ternyata milik orang lain.
+   *  2. **Deployment Protection**: proyek Vercel baru (dan proyek yang scope-nya
+   *     diatur) sering punya Vercel Authentication aktif. Link-nya hidup tapi
+   *     pengunjung hanya melihat halaman login/404 Vercel — user melaporkannya
+   *     sebagai "link permanennya error" padahal build sukses.
+   */
+  let url = status.url;
+  let alias: string | null = null;
+  let link: DeployLinkVerdict | null = null;
+  let protectedFlag = false;
+  let protectionNote: string | null = null;
+
+  if (status.state === 'done' && url) {
+    const info = await fetchVercelProject({ token, scope: options.scope, projectName });
+    alias = info?.productionAliases[0] ?? null;
+    const candidates = [alias ? `https://${alias}` : null, url].filter((value): value is string => Boolean(value));
+    for (const candidate of candidates) {
+      const verdict = await checkDeployLink(candidate);
+      link = verdict;
+      // Link yang menjawab (aplikasi ATAU halaman login Vercel) dipakai; kalau
+      // tidak ada yang menjawab, yang terakhir dipertahankan agar user tetap
+      // melihat link apa adanya beserta catatan masalahnya.
+      if (verdict.kind !== 'unreachable' && verdict.kind !== 'not-found') {
+        url = candidate;
+        break;
+      }
+    }
+    protectedFlag = Boolean(link?.restricted) || Boolean(info?.protected);
+    if (protectedFlag) {
+      protectionNote =
+        link?.restricted && link.kind === 'restricted'
+          ? deployLinkNote(link, { projectName, scope: options.scope })
+          : vercelAuthenticationNote({ projectName, scope: options.scope });
+    }
+  }
+
   return {
     state: status.state,
-    url: status.url,
+    url,
     log: redactSecrets(log, token),
     error: status.error ? explainDeployError(status.error) : null,
     command,
     timedOut: status.state === 'running',
     issue,
+    protected: protectedFlag,
+    protectionNote,
+    alias,
+    link,
   };
 }
 
@@ -1294,6 +1502,12 @@ export async function executeTool(ctx: ToolContext, name: string, rawArgs: Recor
             : outcome.state === 'failed'
               ? `masalah: ${outcome.error ?? 'deploy gagal'}`
               : 'status: BELUM SELESAI - panggil tool deploy sekali lagi untuk melanjutkan (deploy tetap berjalan di sandbox)',
+          // Link yang hidup tapi terkunci Deployment Protection BUKAN link yang
+          // bisa dibagikan: pengunjung hanya melihat login/404 Vercel. Beri tahu
+          // agent apa adanya + cara mematikannya, jangan bilang "selesai" saja.
+          outcome.protected
+            ? `link_terkunci: Deployment Protection (Vercel Authentication) aktif — pengunjung lain hanya melihat halaman login/404 Vercel. ${outcome.protectionNote ?? ''}`.trim()
+            : '',
           // Vercel membangun di sisinya; kalau build-nya gagal (mis. paket belum
           // terdaftar di package.json) agent diberi tahu cara mereproduksinya
           // di sandbox supaya bisa memperbaikinya, bukan menebak.

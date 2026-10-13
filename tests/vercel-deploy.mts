@@ -18,19 +18,33 @@ import {
   DEPLOY_LOG_PATH,
   DEPLOY_PID_PATH,
   buildDeployCommand,
+  buildDisableProtectionRequest,
   buildLinkCommand,
+  buildProjectInfoRequest,
+  deployLinkNote,
   deployShellCommand,
+  deploymentProtectionSettingsUrl,
   explainDeployError,
   extractDeployUrls,
+  judgeDeployLink,
   looksLikeFailureGuidance,
   parseDeployStatus,
+  parseProjectInfo,
   permanentUrlFromLog,
   pickPrimaryUrl,
   productionAlias,
   redactSecrets,
   toVercelProjectName,
+  vercelAuthenticationNote,
 } from '@/lib/deploy/vercel';
-import { TOOL_DEFINITIONS, deployToVercel, executeTool } from '@/lib/sandbox/tools';
+import {
+  TOOL_DEFINITIONS,
+  checkDeployLink,
+  deployToVercel,
+  disableVercelProtection,
+  executeTool,
+  fetchVercelProject,
+} from '@/lib/sandbox/tools';
 
 let pass = 0;
 let fail = 0;
@@ -43,6 +57,33 @@ function check(name: string, condition: boolean, detail?: string) {
     console.log(`  FAIL ${name}${detail ? ` — ${detail}` : ''}`);
   }
 }
+
+/**
+ * Stub jaringan.
+ *
+ * `deployToVercel` sekarang MEMERIKSA linknya dari sisi server (baca proyeknya
+ * lewat API Vercel + membuka URL deploy untuk tahu apakah terkunci Deployment
+ * Protection). Uji ini tidak boleh menembak internet — apalagi domain
+ * `*.vercel.app` yang bisa saja milik orang lain. Default stub: API Vercel = 401
+ * (token palsu), URL lain = 200 (link sehat), sehingga uji lama tetap sahih.
+ */
+type FetchHandler = (url: string, init?: RequestInit) => Response | Promise<Response>;
+const apiError = (status = 401, message = 'Not authorized') =>
+  new Response(JSON.stringify({ error: { message } }), { status, headers: { 'content-type': 'application/json' } });
+
+let fetchHandler: FetchHandler = (url) => (url.includes('api.vercel.com') ? apiError() : new Response('ok', { status: 200 }));
+const fetchCalls: Array<{ url: string; method: string; authorization: string | null; body: string | null }> = [];
+globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+  const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+  const headers = new Headers(init?.headers ?? {});
+  fetchCalls.push({
+    url,
+    method: (init?.method ?? 'GET').toUpperCase(),
+    authorization: headers.get('authorization'),
+    body: typeof init?.body === 'string' ? init.body : null,
+  });
+  return Promise.resolve(fetchHandler(url, init));
+}) as typeof fetch;
 
 const TOKEN = 'vercel_tok_ABC123def456GHI789jkl';
 
@@ -424,6 +465,188 @@ console.log('\n[8] "tekan Deploy lagi" = MELANJUTKAN, bukan deploy baru');
   });
   await deployToVercel(noPid.asSandbox(), { token: TOKEN, waitMs: 20_000 });
   check('tanpa catatan PID => deploy baru (aman)', noPid.background.length === 1, JSON.stringify(noPid.background.map((b) => b.command)));
+}
+
+console.log('\n[9] link deploy terkunci Deployment Protection (Vercel Authentication)');
+{
+  // INSIDEN NYATA (Okt 2026): URL deploy menjawab 302 ke vercel.com/sso-api dan
+  // pengunjung tanpa sesi Vercel hanya melihat halaman login/404 — user
+  // melaporkannya sebagai "link permanennya error" padahal build sukses.
+  const sso = judgeDeployLink({
+    status: 302,
+    location: 'https://vercel.com/sso-api?url=https%3A%2F%2Fsistem-kasir-gxernq6gt-smoke-dev-builder.vercel.app%2F&nonce=abc',
+    setCookie: '_vercel_sso_nonce=abc; Path=/; Secure; HttpOnly',
+  });
+  check('302 ke sso-api = TERKUNCI', sso.restricted && !sso.public, JSON.stringify(sso));
+  check('klasifikasi = vercel-authentication', sso.kind === 'vercel-authentication', sso.kind);
+
+  check('200 = publik', judgeDeployLink({ status: 200 }).public);
+  check('401 juga dianggap terkunci', judgeDeployLink({ status: 401 }).restricted);
+  const notFound = judgeDeployLink({ status: 404, body: '404 NOT_FOUND This page doesn\u2019t exist' });
+  check('404 NOT_FOUND = deployment hilang (bukan terkunci)', notFound.kind === 'not-found' && !notFound.restricted, JSON.stringify(notFound));
+  check('request gagal = unreachable', judgeDeployLink({ status: 0, error: 'fetch failed' }).kind === 'unreachable');
+
+  const info = buildProjectInfoRequest({ projectName: 'Sistem Kasir', scope: 'smoke-dev-builder' });
+  check('API info proyek: nama di-slug-kan', info.url.includes('/v9/projects/sistem-kasir'), info.url);
+  check('API info proyek: scope jadi teamId', info.url.includes('teamId=smoke-dev-builder'), info.url);
+  check('API info proyek: GET', info.method === 'GET');
+
+  const off = buildDisableProtectionRequest({ projectName: 'Sistem Kasir', scope: 'smoke-dev-builder' });
+  check('perintah mematikan proteksi = PATCH', off.method === 'PATCH', off.method);
+  check('body mematikan Vercel Authentication (ssoProtection: null)', off.body === '{"ssoProtection":null}', off.body);
+  check('perintah mematikan proteksi ikut memakai scope', off.url.includes('teamId=smoke-dev-builder'), off.url);
+  check(
+    'halaman pengaturan Vercel bisa dibuka user',
+    deploymentProtectionSettingsUrl({ projectName: 'Sistem Kasir', scope: 'smoke-dev-builder' }) ===
+      'https://vercel.com/smoke-dev-builder/sistem-kasir/settings/deployment-protection',
+    deploymentProtectionSettingsUrl({ projectName: 'Sistem Kasir', scope: 'smoke-dev-builder' }),
+  );
+
+  const parsed = parseProjectInfo(
+    {
+      id: 'prj_1',
+      name: 'sistem-kasir',
+      targets: { production: { alias: ['kasir.example.com', 'sistem-kasir-smoke-dev-builder.vercel.app'] } },
+      ssoProtection: { deploymentType: 'all' },
+    },
+    { scope: 'smoke-dev-builder' },
+  );
+  check('alias produksi dibaca dari API (bukan ditebak)', parsed?.productionAliases.includes('sistem-kasir-smoke-dev-builder.vercel.app'), JSON.stringify(parsed?.productionAliases));
+  check('domain *.vercel.app didahulukan', parsed?.productionAliases[0] === 'sistem-kasir-smoke-dev-builder.vercel.app', JSON.stringify(parsed?.productionAliases));
+  check('status proteksi terbaca', parsed?.protected === true && parsed?.protectionType === 'all', JSON.stringify(parsed));
+  check(
+    'tanpa ssoProtection = tidak terkunci',
+    parseProjectInfo({ name: 'x', ssoProtection: null })?.protected === false,
+    JSON.stringify(parseProjectInfo({ name: 'x', ssoProtection: null })),
+  );
+  check('respons tak dikenal tidak ditebak', parseProjectInfo({ error: { message: 'nope' } }) === null);
+
+  const note = vercelAuthenticationNote({ projectName: 'Sistem Kasir', scope: 'smoke-dev-builder' });
+  check('catatan menyebut Deployment Protection', /Deployment Protection/.test(note), note);
+  check('catatan menyebut cara mematikannya', /Matikan proteksi/.test(note), note);
+  check('catatan menyebut "This page doesn\'t exist" (gejala yang dilihat user)', /This page doesn't exist/.test(note));
+  check('catatan 404 mengarahkan deploy ulang', /deploy lagi/.test(deployLinkNote({ status: 404, kind: 'not-found', public: false, restricted: false, reason: null }) ?? ''));
+}
+
+console.log('\n[10] deploy: link stabil + peringatan saat terkunci');
+{
+  const deployLog = `✅  Production: https://sistem-kasir-gxernq6gt-smoke-dev-builder.vercel.app [12s]\n${DEPLOY_EXIT_PREFIX}0\n`;
+  const projectBody = (protected_: boolean) =>
+    new Response(
+      JSON.stringify({
+        id: 'prj_1',
+        name: 'sistem-kasir',
+        targets: { production: { alias: ['sistem-kasir-smoke-dev-builder.vercel.app'] } },
+        ssoProtection: protected_ ? { deploymentType: 'all' } : null,
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
+
+  // (a) Proyek terkunci: API bilang ssoProtection aktif, linknya 302 ke login.
+  fetchHandler = (url) => {
+    if (url.includes('api.vercel.com')) return projectBody(true);
+    return new Response('', { status: 302, headers: { location: 'https://vercel.com/sso-api?url=x&nonce=y' } });
+  };
+  const locked = await deployToVercel(new FakeSandbox({ logAfterPolls: 1, log: deployLog }).asSandbox(), {
+    token: TOKEN,
+    projectName: 'Sistem Kasir',
+    waitMs: 30_000,
+  });
+  check('deploy terkunci tetap dianggap selesai (bukan gagal)', locked.state === 'done', JSON.stringify(locked.state));
+  check('link yang dipakai = alias produksi stabil dari API', locked.url === 'https://sistem-kasir-smoke-dev-builder.vercel.app', String(locked.url));
+  check('terkunci dilaporkan ke user/agent', locked.protected === true);
+  check('catatan memuat langkah perbaikan', /Deployment Protection/.test(locked.protectionNote ?? ''), String(locked.protectionNote));
+  check('alias dicatat di hasil', locked.alias === 'sistem-kasir-smoke-dev-builder.vercel.app', String(locked.alias));
+
+  // (b) API tidak bisa dibaca (token palsu) tapi linknya jelas 302 ke login.
+  fetchCalls.length = 0;
+  fetchHandler = (url) => (url.includes('api.vercel.com') ? apiError(403) : new Response('', { status: 302, headers: { location: 'https://vercel.com/sso-api?url=x' } }));
+  const probeOnly = await deployToVercel(new FakeSandbox({ logAfterPolls: 1, log: deployLog }).asSandbox(), {
+    token: TOKEN,
+    projectName: 'Sistem Kasir',
+    waitMs: 30_000,
+  });
+  check('tanpa API: tetap terdeteksi dari pemeriksaan link', probeOnly.protected === true);
+  check('tanpa alias: link dari CLI dipertahankan', probeOnly.url === 'https://sistem-kasir-gxernq6gt-smoke-dev-builder.vercel.app', String(probeOnly.url));
+  check('kegagalan API tidak dianggap kegagalan deploy', probeOnly.state === 'done');
+
+  // (c) Alias dari API sudah basi (404) → pakai URL yang dilaporkan CLI.
+  fetchHandler = (url) => {
+    if (url.includes('api.vercel.com')) return projectBody(false);
+    if (url.includes('sistem-kasir-smoke-dev-builder.vercel.app')) return new Response('404 NOT_FOUND', { status: 404 });
+    return new Response('ok', { status: 200 });
+  };
+  const stale = await deployToVercel(new FakeSandbox({ logAfterPolls: 1, log: deployLog }).asSandbox(), {
+    token: TOKEN,
+    projectName: 'Sistem Kasir',
+    waitMs: 30_000,
+  });
+  check('alias mati (404) tidak dipakai', stale.url === 'https://sistem-kasir-gxernq6gt-smoke-dev-builder.vercel.app', String(stale.url));
+  check('link sehat tidak dilaporkan terkunci', stale.protected === false && stale.protectionNote === null);
+
+  // (d) Tidak ada koneksi sama sekali: jangan mengarang kesimpulan.
+  fetchHandler = () => {
+    throw new Error('network down');
+  };
+  const offline = await checkDeployLink('https://x.vercel.app');
+  check('gagal menghubungi link = unreachable (bukan "terkunci")', offline.kind === 'unreachable' && !offline.restricted, JSON.stringify(offline));
+  const offlineOutcome = await deployToVercel(new FakeSandbox({ logAfterPolls: 1, log: deployLog }).asSandbox(), {
+    token: TOKEN,
+    projectName: 'Sistem Kasir',
+    waitMs: 30_000,
+  });
+  check('link tetap dilaporkan walau pemeriksaan gagal', offlineOutcome.state === 'done' && Boolean(offlineOutcome.url), String(offlineOutcome.url));
+}
+
+console.log('\n[11] matikan proteksi lewat API Vercel (tombol di panel Preview)');
+{
+  fetchHandler = (url, init) => {
+    if (url.includes('api.vercel.com')) {
+      if ((init?.method ?? 'GET').toUpperCase() === 'PATCH') {
+        return new Response(JSON.stringify({ id: 'prj_1', name: 'sistem-kasir', ssoProtection: null }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ id: 'prj_1', name: 'sistem-kasir', ssoProtection: { deploymentType: 'all' } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    return new Response('ok', { status: 200 });
+  };
+  fetchCalls.length = 0;
+  const res = await disableVercelProtection({ token: TOKEN, scope: 'smoke-dev-builder', projectName: 'Sistem Kasir' });
+  check('berhasil mematikan proteksi', res.ok === true, JSON.stringify(res));
+  const patch = fetchCalls.find((c) => c.method === 'PATCH');
+  check('memakai PATCH ke API proyek', Boolean(patch), JSON.stringify(fetchCalls.map((c) => `${c.method} ${c.url}`)));
+  check('token dikirim lewat header Authorization', patch?.authorization === `Bearer ${TOKEN}`, String(patch?.authorization));
+  check('token TIDAK ada di URL', !fetchCalls.some((c) => c.url.includes(TOKEN)), JSON.stringify(fetchCalls.map((c) => c.url)));
+  check('body = ssoProtection:null', patch?.body === '{"ssoProtection":null}', String(patch?.body));
+
+  // Scope salah → coba ulang tanpa teamId (token pribadi tidak menerima teamId).
+  fetchCalls.length = 0;
+  fetchHandler = (url, init) => {
+    if (!url.includes('api.vercel.com')) return new Response('ok', { status: 200 });
+    if (url.includes('teamId=')) return apiError(404, 'Project not found');
+    return new Response(JSON.stringify({ id: 'prj_1', name: 'sistem-kasir', ssoProtection: null }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  };
+  const retry = await disableVercelProtection({ token: TOKEN, scope: 'tim-salah', projectName: 'Sistem Kasir' });
+  check('scope salah => dicoba ulang tanpa teamId', retry.ok === true, JSON.stringify(retry));
+  check('percobaan kedua benar-benar dilakukan', fetchCalls.filter((c) => c.method === 'PATCH').length === 2, JSON.stringify(fetchCalls.map((c) => c.url)));
+
+  // Token ditolak → pesan yang bisa ditindak, bukan kegagalan senyap.
+  fetchHandler = (url) => (url.includes('api.vercel.com') ? apiError(403, 'Forbidden') : new Response('ok', { status: 200 }));
+  const denied = await disableVercelProtection({ token: TOKEN, projectName: 'Sistem Kasir' });
+  check('token ditolak dilaporkan gagal', denied.ok === false);
+  check('saran manual diberikan', /Deployment Protection/.test(denied.message), denied.message);
+
+  // fetchVercelProject: respons error → null (jangan menebak status proyek).
+  const none = await fetchVercelProject({ token: TOKEN, projectName: 'Sistem Kasir' });
+  check('info proyek null saat API menolak', none === null, JSON.stringify(none));
 }
 
 console.log(`\nhasil: ${pass} ok, ${fail} gagal`);

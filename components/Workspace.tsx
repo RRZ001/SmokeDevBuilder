@@ -81,6 +81,18 @@ export default function Workspace() {
   const [sandboxBusy, setSandboxBusy] = useState(false);
   const [deploying, setDeploying] = useState(false);
   const [deployNote, setDeployNote] = useState<string | null>(null);
+  const [disablingProtection, setDisablingProtection] = useState(false);
+  /**
+   * Status Deployment Protection link deploy aktif: link hidup tapi pengunjung
+   * lain hanya melihat login/404 Vercel. Diperiksa saat proyek dibuka (panel
+   * Preview) dan saat deploy selesai, supaya user tidak mengira linknya siap
+   * dibagikan.
+   */
+  const [protection, setProtection] = useState<{ protected: boolean; note: string | null; settingsUrl: string | null }>({
+    protected: false,
+    note: null,
+    settingsUrl: null,
+  });
   const [preview, setPreview] = useState<PreviewState>({
     url: null,
     port: 3000,
@@ -857,8 +869,23 @@ export default function Workspace() {
             const url = String(event.url);
             const at = String(event.deployAt ?? new Date().toISOString());
             setDeployNote(null);
+            // Deploy baru = status proteksi diperiksa ulang; event
+            // `deploy_protected` menyusul kalau ternyata masih terkunci.
+            setProtection({ protected: false, note: null, settingsUrl: null });
             setProjects((prev) => prev.map((p) => (p.id === activeId ? { ...p, deploy_url: url, deploy_at: at } : p)));
             pushLine('info', `Selesai! Link permanen: ${url}`);
+          } else if (event.type === 'deploy_protected') {
+            // Link hidup tapi terkunci Vercel Authentication — tampilkan
+            // peringatan + tombol "Matikan proteksi", jangan biarkan user
+            // membagikan link yang cuma menampilkan halaman login Vercel.
+            const note = event.message ? String(event.message) : null;
+            setProtection({
+              protected: true,
+              note,
+              settingsUrl: event.settingsUrl ? String(event.settingsUrl) : null,
+            });
+            setProjects((prev) => prev.map((p) => (p.id === activeId ? { ...p, deploy_url: String(event.url) } : p)));
+            if (note) pushLine('error', note);
           } else if (event.type === 'deploy_pending') {
             pending = true;
             const message = String(event.message ?? 'Deploy masih berjalan di Vercel.');
@@ -886,6 +913,74 @@ export default function Workspace() {
       setDeploying(false);
     }
   }, [activeId, activeProject?.name, deploying, pushLine]);
+
+  /**
+   * Periksa status Deployment Protection link deploy proyek aktif (dari server;
+   * token Vercel tidak pernah ke browser). Dipanggil saat proyek dibuka supaya
+   * peringatan "link masih terkunci" tetap muncul setelah reload.
+   */
+  useEffect(() => {
+    if (!activeId || !activeProject?.deploy_url) {
+      setProtection({ protected: false, note: null, settingsUrl: null });
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const state = await apiJson<{
+          protected?: boolean;
+          note?: string | null;
+          settingsUrl?: string | null;
+        }>(`/api/projects/${activeId}/deploy/protection`);
+        if (cancelled) return;
+        setProtection({
+          protected: Boolean(state.protected),
+          note: state.note ?? null,
+          settingsUrl: state.settingsUrl ?? null,
+        });
+      } catch {
+        // Status proteksi bersifat informasi — kegagalan pemeriksaan tidak boleh
+        // mengganggu workspace (biarkan tanpa peringatan).
+        if (!cancelled) setProtection({ protected: false, note: null, settingsUrl: null });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeId, activeProject?.deploy_url]);
+
+  /** Tombol "Matikan proteksi" — lewat API Vercel memakai token di Settings. */
+  const disableDeployProtection = useCallback(async () => {
+    if (!activeId || disablingProtection) return;
+    setDisablingProtection(true);
+    setDeployNote('Mematikan Deployment Protection…');
+    try {
+      const result = await apiJson<{
+        ok?: boolean;
+        message?: string;
+        state?: { protected?: boolean; note?: string | null; settingsUrl?: string | null };
+      }>(`/api/projects/${activeId}/deploy/protection`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ projectName: activeProject?.name }),
+      });
+      const next = result.state;
+      setProtection({
+        protected: Boolean(next?.protected),
+        note: next?.note ?? null,
+        settingsUrl: next?.settingsUrl ?? null,
+      });
+      const message = result.message ?? (result.ok ? 'Proteksi dimatikan.' : 'Gagal mematikan proteksi.');
+      setDeployNote(result.ok ? null : message);
+      pushLine(result.ok ? 'info' : 'error', message);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setDeployNote(message);
+      pushLine('error', message);
+    } finally {
+      setDisablingProtection(false);
+    }
+  }, [activeId, activeProject?.name, disablingProtection, pushLine]);
 
   const storageLabel = useMemo(() => {
     const storage = capabilities.storage;
@@ -1031,6 +1126,11 @@ export default function Workspace() {
             deploying={deploying}
             deployNote={deployNote}
             onDeploy={() => void deployProject()}
+            deployProtected={protection.protected}
+            deployProtectionNote={protection.note}
+            deploySettingsUrl={protection.settingsUrl}
+            disablingProtection={disablingProtection}
+            onDisableProtection={() => void disableDeployProtection()}
             activeTab={tab}
             onTabChange={setTab}
           />
