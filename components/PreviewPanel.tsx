@@ -100,6 +100,11 @@ export default function PreviewPanel({
         </span>
 
         <div className="flex min-w-0 flex-1 items-center gap-2 rounded-lg border border-white/10 bg-ink-900 px-2.5 py-1">
+          {/* Label ini penting: URL di sini adalah PREVIEW SANDBOX (hidup selama
+              sandbox hidup), bukan link permanen hasil deploy. */}
+          <span className="shrink-0 rounded bg-white/[0.06] px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-ink-400">
+            sandbox
+          </span>
           <span
             className={`h-1.5 w-1.5 shrink-0 rounded-full ${online ? 'bg-emerald-400' : status === '000' ? 'bg-rose-400' : 'bg-amber-400'}`}
           />
@@ -165,7 +170,10 @@ export default function PreviewPanel({
         <div className="flex flex-wrap items-center gap-2 border-b border-white/[0.06] bg-white/[0.02] px-3 py-1.5 text-[11.5px] text-ink-300">
           {deployUrl ? (
             <>
-              <span className="font-semibold text-emerald-300">Link permanen:</span>
+              <span className="shrink-0 rounded bg-emerald-400/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-300">
+              deploy
+            </span>
+            <span className="font-semibold text-emerald-300">Link permanen:</span>
               <a
                 href={deployUrl}
                 target="_blank"

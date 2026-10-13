@@ -35,13 +35,17 @@ import {
 } from '@/lib/sandbox/diagnostics';
 import {
   DEPLOY_LOG_PATH,
+  DEPLOY_PID_PATH,
   DEPLOY_POLL_MS,
   DEPLOY_TIMEOUT_MS,
   VERCEL_MARKER,
   buildDeployCommand,
+  buildLinkCommand,
   deployShellCommand,
   explainDeployError,
   parseDeployStatus,
+  parseProcessAlive,
+  processAliveScript,
   redactSecrets,
   type DeployState,
   type DeployStatus,
@@ -654,6 +658,11 @@ export type DeployOutcome = {
   command: string;
   /** true = deploy masih berjalan saat batas tunggu request tercapai. */
   timedOut: boolean;
+  /**
+   * Masalah yang terbaca dari log build Vercel (mis. modul belum terpasang di
+   * package.json) — dipakai menyusun saran perbaikan untuk agent.
+   */
+  issue?: PreviewIssue | null;
 };
 
 /**
@@ -664,6 +673,33 @@ export type DeployOutcome = {
  * cara ini prosesnya tidak ikut terbunuh — pemanggilan berikutnya cukup
  * MELANJUTKAN membaca log yang sama (lihat `timedOut`).
  */
+/** Baca file log deploy (dengan penyaringan token). */
+async function readDeployLog(sandbox: Sandbox, token: string): Promise<string> {
+  try {
+    const raw = await sandbox.files.read(DEPLOY_LOG_PATH);
+    return redactSecrets(String(raw ?? ''), token);
+  } catch {
+    return '';
+  }
+}
+
+/** Baca PID proses deploy yang tercatat (null kalau tidak ada/tidak sah). */
+async function readDeployPid(sandbox: Sandbox): Promise<number | null> {
+  try {
+    const raw = await sandbox.files.read(DEPLOY_PID_PATH);
+    const pid = Number(String(raw ?? '').trim());
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Apakah proses deploy yang tercatat masih hidup? */
+async function isProcessAlive(sandbox: Sandbox, pid: number): Promise<boolean> {
+  const res = await runCommand(sandbox, processAliveScript(pid), { cwd: '/', timeoutMs: 15_000 }).catch(() => null);
+  return parseProcessAlive(`${res?.stdout ?? ''}\n${res?.stderr ?? ''}`);
+}
+
 export async function deployToVercel(
   sandbox: Sandbox,
   options: {
@@ -690,24 +726,70 @@ export async function deployToVercel(
 
   const cwd = options.cwd || SANDBOX_PROJECT_DIR;
   const projectName = options.projectName || '';
-  const command = buildDeployCommand({ projectName, scope: options.scope });
-  const shell = deployShellCommand(command);
 
-  // Log lama dibuang supaya status yang dibaca jelas milik deploy ini.
-  await runCommand(sandbox, `: > ${DEPLOY_LOG_PATH}`, { cwd: '/', timeoutMs: 15_000 }).catch(() => undefined);
+  /**
+   * MELANJUTKAN vs MEMULAI.
+   *
+   * Pesan ke user berbunyi "tekan Deploy sekali lagi untuk mengambil linknya" —
+   * supaya itu benar-benar melanjutkan (bukan menumpuk deployment baru dan
+   * membuang hasil yang sedang berjalan), deploy yang masih hidup dipantau ulang:
+   * log ada isinya, penandanya belum bilang selesai, dan PROSESNYA masih hidup.
+   * Kalau prosesnya sudah hilang (mis. sandbox di-pause di tengah deploy), deploy
+   * dimulai dari awal — kalau tidak, statusnya bisa menggantung selamanya.
+   */
+  const priorLog = await readDeployLog(sandbox, token);
+  const priorStatus = parseDeployStatus(priorLog, { token });
+  const priorPid = await readDeployPid(sandbox);
+  const priorAlive = priorPid ? await isProcessAlive(sandbox, priorPid) : false;
+  const resuming = Boolean(priorLog.trim()) && priorStatus.state === 'running' && priorAlive;
 
-  // Token dikirim lewat envs (bukan argumen) supaya tidak muncul di daftar
-  // argumen proses maupun di log yang ditampilkan.
-  await sandbox.commands.run(shell, {
-    background: true,
-    cwd,
-    envs: { VERCEL_TOKEN: token },
-  });
+  let command = buildDeployCommand({ scope: options.scope });
+
+  if (resuming) {
+    options.onOutput?.('[melanjutkan deploy yang sedang berjalan di sandbox…]\n');
+  } else {
+    // Penautan folder → nama proyek dijalankan lebih dulu. Opsi `--name` pada
+    // `deploy` sudah deprecated, dan tanpa penautan nama proyek akan mengikuti
+    // nama folder sandbox ("project") sehingga linknya tidak berarti.
+    if (projectName) {
+      const link = buildLinkCommand({ projectName, scope: options.scope });
+      const linkResult = await runCommand(sandbox, link, {
+        cwd,
+        timeoutMs: 90_000,
+        onOutput: options.onOutput ? (text) => options.onOutput?.(redactSecrets(text, token)) : undefined,
+      }).catch(() => null);
+      // Kegagalan `link` tidak fatal: `deploy --yes` tetap bisa membuat proyek baru.
+      void linkResult;
+    }
+
+    command = buildDeployCommand({ scope: options.scope });
+    const shell = deployShellCommand(command);
+
+    // Log lama dibuang supaya status yang dibaca jelas milik deploy ini.
+    await runCommand(sandbox, `: > ${DEPLOY_LOG_PATH}`, { cwd: '/', timeoutMs: 15_000 }).catch(() => undefined);
+
+    // Token dikirim lewat envs (bukan argumen) supaya tidak muncul di daftar
+    // argumen proses maupun di log yang ditampilkan.
+    const handle = await sandbox.commands.run(shell, {
+      background: true,
+      cwd,
+      envs: { VERCEL_TOKEN: token },
+    });
+    // PID dicatat supaya panggilan berikutnya bisa tahu prosesnya masih hidup.
+    await sandbox.files.write(DEPLOY_PID_PATH, String(handle.pid)).catch(() => undefined);
+  }
 
   const budget = Math.max(5_000, Math.min(options.waitMs ?? 120_000, DEPLOY_TIMEOUT_MS));
   const deadline = Date.now() + budget;
   let status: DeployStatus = { state: 'running', url: null, urls: [], error: null };
   let log = '';
+  /**
+   * Sudah berapa karakter log yang dikirim ke UI. Hanya bagian BARU yang
+   * dipancarkan — kalau tidak, ekor log yang sama terkirim ulang tiap polling dan
+   * terminal user penuh baris berulang (kejadian nyata, Okt 2026). Saat
+   * melanjutkan, log yang sudah ada dikirim sekali di awal (dipotong ekornya).
+   */
+  let sent = resuming ? Math.max(0, priorLog.length - 4_000) : 0;
 
   for (;;) {
     await new Promise((resolve) => setTimeout(resolve, DEPLOY_POLL_MS));
@@ -716,9 +798,16 @@ export async function deployToVercel(
       () => log,
     );
     status = parseDeployStatus(log, { token, projectName });
-    options.onOutput?.(redactSecrets(redactTail(log), token));
+
+    if (log.length < sent) sent = 0; // file log ditulis ulang
+    const fresh = log.slice(sent);
+    sent = log.length;
+    if (fresh.trim()) options.onOutput?.(fresh);
+
     if (status.state !== 'running' || Date.now() >= deadline) break;
   }
+
+  const issue = detectPreviewIssue({ log });
 
   return {
     state: status.state,
@@ -727,13 +816,8 @@ export async function deployToVercel(
     error: status.error ? explainDeployError(status.error) : null,
     command,
     timedOut: status.state === 'running',
+    issue,
   };
-}
-
-/** Ambil beberapa baris terakhir log (untuk dipancarkan ke UI secara live). */
-function redactTail(log: string, lines = 6): string {
-  const all = (log || '').split('\n').filter((line) => line.trim());
-  return all.slice(-lines).join('\n');
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1210,7 +1294,15 @@ export async function executeTool(ctx: ToolContext, name: string, rawArgs: Recor
             : outcome.state === 'failed'
               ? `masalah: ${outcome.error ?? 'deploy gagal'}`
               : 'status: BELUM SELESAI - panggil tool deploy sekali lagi untuk melanjutkan (deploy tetap berjalan di sandbox)',
-          outcome.log ? `logs:\n${truncate(outcome.log, 2_500)}` : '',
+          // Vercel membangun di sisinya; kalau build-nya gagal (mis. paket belum
+          // terdaftar di package.json) agent diberi tahu cara mereproduksinya
+          // di sandbox supaya bisa memperbaikinya, bukan menebak.
+          outcome.issue?.fixCommand
+            ? `perbaikan: jalankan \`${outcome.issue.fixCommand}\`, lalu \`npm run build\` untuk memastikan build lokalnya lolos, lalu panggil deploy lagi`
+            : outcome.state === 'failed'
+              ? 'cara memeriksa: jalankan `npm run build` di folder proyek untuk mereproduksi kegagalan build Vercel, perbaiki, lalu deploy lagi'
+              : '',
+          outcome.log ? `logs:\n${truncate(outcome.log, 2_000)}` : '',
         ].filter(Boolean);
 
         return { ok: outcome.state === 'done', output: lines.join('\n'), previewUrl: outcome.url ?? undefined };

@@ -98,7 +98,10 @@ export async function POST(request: Request, ctx: Ctx) {
         return { url: null, state: 'failed' };
       }
 
-      send({ type: 'log', value: `Menjalankan: ${buildDeployCommand({ projectName, prod: body.prod !== false, scope: vercel.scope })}` });
+      send({
+        type: 'log',
+        value: `Menautkan proyek "${projectName}" lalu menjalankan: ${buildDeployCommand({ prod: body.prod !== false, scope: vercel.scope })}`,
+      });
       const outcome = await deployToVercel(sandbox, {
         token: vercel.token,
         scope: vercel.scope,
@@ -115,10 +118,14 @@ export async function POST(request: Request, ctx: Ctx) {
         send({
           type: 'deploy_pending',
           message:
-            'Deploy masih berjalan di Vercel (biasanya selesai < 2 menit). Tekan Deploy sekali lagi sebentar lagi untuk mengambil linknya — prosesnya tidak dibatalkan.',
+            'Deploy masih berjalan di Vercel. Pemantauan dilanjutkan otomatis — prosesnya tidak dibatalkan dan tidak diulang dari awal.',
+          retryable: true,
         });
       } else {
-        send({ type: 'deploy_error', message: outcome.error ?? 'Deploy gagal.' });
+        // Kalau log build Vercel menunjukkan penyebab yang bisa ditindak (mis.
+        // paket belum ada di package.json), sertakan perintah perbaikannya.
+        const fix = outcome.issue?.fixCommand ? ` Jalankan \`${outcome.issue.fixCommand}\`, lalu coba Deploy lagi.` : '';
+        send({ type: 'deploy_error', message: `${outcome.error ?? 'Deploy gagal.'}${fix}` });
       }
       return { url: outcome.url, state: outcome.state };
     })();

@@ -835,30 +835,48 @@ export default function Workspace() {
     setMobileView('code');
     setTab('terminal');
     pushLine('info', '— deploy ke Vercel —');
+    /**
+     * Deploy bisa lebih lama daripada batas durasi satu request, jadi server
+     * membalas `deploy_pending` dan prosesnya tetap berjalan DI SANDBOX. Di sini
+     * pemantauan dilanjutkan otomatis (bukan menyuruh user menekan tombol lagi),
+     * dan server mengenali permintaan lanjutan lewat PID proses yang masih hidup —
+     * jadi tidak ada deployment kedua yang sia-sia.
+     */
+    const MAX_ATTEMPTS = 3;
     try {
-      for await (const event of streamNdjson(`/api/projects/${activeId}/deploy`, {
-        cwd: undefined,
-        projectName: activeProject?.name,
-      })) {
-        if (event.type === 'log') {
-          const value = String(event.value ?? '').trim();
-          if (value) pushLine('output', value);
-        } else if (event.type === 'deploy_url') {
-          const url = String(event.url);
-          const at = String(event.deployAt ?? new Date().toISOString());
-          setDeployNote(null);
-          setProjects((prev) => prev.map((p) => (p.id === activeId ? { ...p, deploy_url: url, deploy_at: at } : p)));
-          pushLine('info', `Selesai! Link permanen: ${url}`);
-        } else if (event.type === 'deploy_pending') {
-          setDeployNote(String(event.message ?? 'Deploy masih berjalan di Vercel.'));
-          pushLine('info', String(event.message ?? ''));
-        } else if (event.type === 'deploy_error') {
-          const message = String(event.message ?? 'Deploy gagal.');
-          setDeployNote(message);
-          pushLine('error', message);
-        } else if (event.type === 'error') {
-          pushLine('error', String(event.message));
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+        let pending = false;
+        for await (const event of streamNdjson(`/api/projects/${activeId}/deploy`, {
+          cwd: undefined,
+          projectName: activeProject?.name,
+        })) {
+          if (event.type === 'log') {
+            const value = String(event.value ?? '').trim();
+            if (value) pushLine('output', value);
+          } else if (event.type === 'deploy_url') {
+            const url = String(event.url);
+            const at = String(event.deployAt ?? new Date().toISOString());
+            setDeployNote(null);
+            setProjects((prev) => prev.map((p) => (p.id === activeId ? { ...p, deploy_url: url, deploy_at: at } : p)));
+            pushLine('info', `Selesai! Link permanen: ${url}`);
+          } else if (event.type === 'deploy_pending') {
+            pending = true;
+            const message = String(event.message ?? 'Deploy masih berjalan di Vercel.');
+            setDeployNote(
+              attempt < MAX_ATTEMPTS ? `${message} (percobaan ${attempt}/${MAX_ATTEMPTS})` : message,
+            );
+            pushLine('info', message);
+          } else if (event.type === 'deploy_error') {
+            const message = String(event.message ?? 'Deploy gagal.');
+            setDeployNote(message);
+            pushLine('error', message);
+          } else if (event.type === 'error') {
+            pushLine('error', String(event.message));
+          }
         }
+        if (!pending) break;
+        if (attempt === MAX_ATTEMPTS) break;
+        await new Promise((resolve) => setTimeout(resolve, 8_000));
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

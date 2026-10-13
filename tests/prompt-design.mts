@@ -77,7 +77,8 @@ check('folder proyek disebut', /\/home\/user\/project/.test(agent));
 check('tool deploy disebut di daftar tool', /browser_check, deploy\./.test(agent));
 check('deploy hanya kalau user meminta', /Deploy hanya kalau diminta/.test(agent) && /LINK PERMANEN/.test(agent));
 check('token deploy diambil dari Settings (tidak ditulis agent)', /token diambil aplikasi dari Settings/.test(agent));
-check('larangan mengarang URL deploy', /jangan mengarang URL/.test(agent));
+check('larangan mengarang/menebak URL deploy', /jangan mengarang atau menebak URL/.test(agent));
+check('deploy gagal build => reproduksi dengan npm run build dulu', /reproduksi dulu di sandbox dengan `npm run build`/.test(agent));
 
 console.log('\n[4] penomoran langkah berurutan');
 {
