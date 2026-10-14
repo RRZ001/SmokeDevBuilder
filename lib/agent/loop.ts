@@ -5,7 +5,7 @@ import { TOOL_DEFINITIONS, executeTool, type ToolContext, type ToolResult } from
 import { CHOICE_MARKERS, parseChoices } from './choices';
 import { PLAN_MARKERS, parsePlans } from './plan';
 import { createMarkerStreamFilter, type MarkerPair } from './marker-block';
-import { autoDebugNudge, buildSystemPrompt, stepBudgetNotice, visualCheckNudge, type AgentMode } from './prompt';
+import { autoDebugNudge, buildSystemPrompt, stepBudgetNotice, stopTurnSummaryNotice, visualCheckNudge, type AgentMode } from './prompt';
 import { OpenRouterError, streamChat, type ChatMsg, type UsageInfo } from './openrouter';
 import { supportsVision } from './vision';
 
@@ -206,6 +206,12 @@ export async function* runAgent(options: RunAgentOptions): AsyncGenerator<AgentE
       });
 
       let hadError = false;
+      /**
+       * true = ada tool (mis. `deploy` yang belum selesai) yang meminta giliran ini
+       * DITUTUP. Tanpa ini agent mengulang tool yang sama di setiap langkah
+       * sampai batas langkah dan menulis kalimat berulang ke chat user.
+       */
+      let stopTurnRequested = false;
       /** Screenshot dari browser_check pada langkah ini (untuk model & UI). */
       const shots: Array<{ dataUrl: string; caption: string }> = [];
 
@@ -253,6 +259,7 @@ export async function* runAgent(options: RunAgentOptions): AsyncGenerator<AgentE
         // server preview benar-benar siap, atau model sudah mencoba memeriksanya.
         if (call.name === 'start_server' && result.ok) previewStarted = true;
         if (call.name === 'browser_check') visuallyChecked = true;
+        if (result.stopTurn) stopTurnRequested = true;
 
         yield {
           type: 'tool_result',
@@ -291,6 +298,61 @@ export async function* runAgent(options: RunAgentOptions): AsyncGenerator<AgentE
       }
 
       if (signal?.aborted) break;
+
+      /**
+       * Tool meminta giliran ditutup (mis. `deploy` belum selesai): jangan ulangi
+       * tool itu, tetapi tetap beri kesempatan SEKALI kepada model untuk menulis
+       * penjelasan ke user — TANPA daftar tool, supaya ia tidak bisa memanggil
+       * tool lagi. Inilah yang menghentikan rentetan "Deploy masih berjalan.
+       * Saya akan cek sekali lagi" di chat.
+       */
+      if (stopTurnRequested) {
+        messages.push({ role: 'user', content: stopTurnSummaryNotice() });
+        const stopFilter = createMarkerStreamFilter(CONTENT_MARKERS);
+        let stopBlock: TextBlock | null = null;
+        let stopText = '';
+        // TANPA `tools`: model tidak bisa memanggil tool lagi, ia hanya bisa
+        // menjelaskan keadaan ke user.
+        for await (const event of streamChat({ apiKey, model, messages, signal, maxTokens: MAX_OUTPUT_TOKENS, sessionId })) {
+          if (event.type === 'text') {
+            stopText += event.value;
+            if (!stopBlock) {
+              stopBlock = { type: 'text', text: '' };
+              blocks.push(stopBlock);
+            }
+            stopBlock.text = stopText;
+            const visible = stopFilter.push(event.value);
+            if (visible) yield { type: 'text', value: visible };
+          } else if (event.type === 'usage') {
+            turnUsage.promptTokens += event.value.promptTokens;
+            turnUsage.completionTokens += event.value.completionTokens;
+            turnUsage.cachedTokens += event.value.cachedTokens ?? 0;
+            if (typeof event.value.costUsd === 'number') turnUsage.costUsd = (turnUsage.costUsd ?? 0) + event.value.costUsd;
+            yield { type: 'usage', value: { ...turnUsage } };
+          } else if (event.type === 'retry') {
+            yield event;
+          }
+        }
+        const stopTail = stopFilter.flush();
+        if (stopTail) yield { type: 'text', value: stopTail };
+        if (stopBlock) {
+          const parsedStop = parseChoices(stopText);
+          const parsedStopPlan = parsePlans(parsedStop.questions.length ? parsedStop.cleaned : stopText);
+          stopBlock.text = parsedStopPlan.cleaned;
+          for (const items of parsedStopPlan.plans) {
+            blocks.push({ type: 'plan', items });
+            yield { type: 'plan', items };
+          }
+          if (parsedStop.questions.length) {
+            blocks.push({ type: 'choices', questions: parsedStop.questions });
+            yield { type: 'choices', questions: parsedStop.questions };
+          }
+          if (parsedStopPlan.cleaned.trim()) {
+            finalText = finalText ? `${finalText}\n${parsedStopPlan.cleaned}` : parsedStopPlan.cleaned;
+          }
+        }
+        break;
+      }
 
       // Kirim screenshot ke model HANYA kalau modelnya memang bisa melihat.
       // Kalau tidak, agent diberi tahu supaya tidak menyangka sudah melihat

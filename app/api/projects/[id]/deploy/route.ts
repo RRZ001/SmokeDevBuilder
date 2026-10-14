@@ -4,7 +4,8 @@ import { buildDeployCommand, deploymentProtectionSettingsUrl } from '@/lib/deplo
 import { getStore } from '@/lib/db';
 import { loadProject } from '@/lib/projects';
 import { getSandbox, hasE2bKey } from '@/lib/sandbox/manager';
-import { deployToVercel, ensureVercel, resolvePath } from '@/lib/sandbox/tools';
+import { deployToVercel, detectAppDir, ensureVercel, resolvePath } from '@/lib/sandbox/tools';
+import { SANDBOX_PROJECT_DIR } from '@/lib/config';
 import { effectiveVercel, owner } from '@/lib/session';
 
 export const dynamic = 'force-dynamic';
@@ -98,6 +99,31 @@ export async function POST(request: Request, ctx: Ctx) {
         return { url: null, state: 'failed' };
       }
 
+      /**
+       * Folder aplikasi. Tombol Deploy tidak tahu di mana aplikasinya dibuat —
+       * dan aplikasi sering berada di SUB-FOLDER (`/home/user/project/kasir`).
+       * Mengirim folder akar proyek ke Vercel menghasilkan "situs kosong" yang
+       * menjawab 404 ("The page could not be found") di SEMUA alamat, padahal
+       * CLI melaporkan sukses — inilah bentuk nyata keluhan "link permanennya
+       * error". Jadi foldernya dideteksi dulu (bukti dari catatan dev server +
+       * pemindaian package.json/index.html).
+       */
+      let deployCwd = body.cwd ? resolvePath(body.cwd) : SANDBOX_PROJECT_DIR;
+      if (!body.cwd) {
+        const detected = await detectAppDir(sandbox, SANDBOX_PROJECT_DIR);
+        if (detected) {
+          deployCwd = detected.dir;
+          send({ type: 'log', value: `[deploy] folder aplikasi: ${detected.dir} — ${detected.note}` });
+        } else {
+          send({
+            type: 'log',
+            value:
+              '[deploy] PERINGATAN: tidak ditemukan package.json/index.html di folder proyek maupun sub-foldernya. ' +
+              'Deploy akan mengirim folder proyek apa adanya dan kemungkinan menghasilkan situs kosong (404 di semua alamat).',
+          });
+        }
+      }
+
       send({
         type: 'log',
         value: `Menautkan proyek "${projectName}" lalu menjalankan: ${buildDeployCommand({ prod: body.prod !== false, scope: vercel.scope })}`,
@@ -105,7 +131,7 @@ export async function POST(request: Request, ctx: Ctx) {
       const outcome = await deployToVercel(sandbox, {
         token: vercel.token,
         scope: vercel.scope,
-        cwd: body.cwd ? resolvePath(body.cwd) : undefined,
+        cwd: deployCwd,
         projectName,
         waitMs: 170_000,
         onOutput: (text) => send({ type: 'log', value: text }),
@@ -125,6 +151,10 @@ export async function POST(request: Request, ctx: Ctx) {
             message: outcome.protectionNote ?? null,
             settingsUrl: deploymentProtectionSettingsUrl({ projectName, scope: vercel.scope }),
           });
+        } else if (outcome.warningNote) {
+          // Deployment "sukses" tapi tidak menyajikan halaman (404 di semua
+          // alamat) — jangan biarkan user mengira linknya siap dibagikan.
+          send({ type: 'deploy_warning', url: outcome.url, message: outcome.warningNote, kind: outcome.link?.kind ?? null });
         }
       } else if (outcome.timedOut) {
         send({

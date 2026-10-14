@@ -42,6 +42,8 @@ type Props = {
   deploySettingsUrl?: string | null;
   disablingProtection?: boolean;
   onDisableProtection?: () => void;
+  /** Masalah lain pada link deploy (mis. deployment tidak menyajikan halaman apa pun). */
+  deployWarning?: string | null;
 };
 
 export default function PreviewPanel({
@@ -72,6 +74,7 @@ export default function PreviewPanel({
   deploySettingsUrl,
   disablingProtection,
   onDisableProtection,
+  deployWarning,
 }: Props) {
   const [portDraft, setPortDraft] = useState(String(port));
   const [nonce, setNonce] = useState(0);
@@ -245,6 +248,15 @@ export default function PreviewPanel({
             {deployProtectionNote ??
               'Pengunjung lain dibawa ke halaman login Vercel (terlihat seperti halaman error / "This page doesn\'t exist"). Matikan Deployment Protection → Vercel Authentication untuk proyek ini.'}
           </p>
+        </div>
+      )}
+
+      {deployWarning && !deployProtected && (
+        <div className="border-b border-rose-300/25 bg-rose-400/[0.12] px-3 py-2 text-[11.5px] leading-relaxed text-rose-50">
+          <div className="flex items-center gap-1.5 font-semibold text-rose-200">
+            <WarnIcon className="h-3.5 w-3.5" /> Link deploy belum menyajikan aplikasi
+          </div>
+          <p className="mt-1 text-rose-50/90">{deployWarning}</p>
         </div>
       )}
 

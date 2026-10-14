@@ -80,6 +80,8 @@ type Props = {
   deploySettingsUrl: string | null;
   disablingProtection: boolean;
   onDisableProtection: () => void;
+  /** Masalah link deploy selain proteksi (mis. 404 di semua alamat). */
+  deployWarning: string | null;
   activeTab: Tab;
   onTabChange: (tab: Tab) => void;
 };
@@ -243,6 +245,7 @@ export default function CodePanel(props: Props) {
           deploySettingsUrl={props.deploySettingsUrl}
           disablingProtection={props.disablingProtection}
           onDisableProtection={props.onDisableProtection}
+          deployWarning={props.deployWarning}
           onRefresh={props.onRefreshPreview}
           onRestart={props.onRestartPreview}
           onSetPort={props.onSetPort}

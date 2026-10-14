@@ -17,17 +17,24 @@ import {
   DEPLOY_EXIT_PREFIX,
   DEPLOY_LOG_PATH,
   DEPLOY_PID_PATH,
+  buildAppDirScanScript,
   buildDeployCommand,
   buildDisableProtectionRequest,
   buildLinkCommand,
   buildProjectInfoRequest,
+  chooseAppDir,
   deployLinkNote,
+  deployStartedAtScript,
+  deployStillRunningMessage,
+  formatDuration,
   deployShellCommand,
   deploymentProtectionSettingsUrl,
   explainDeployError,
   extractDeployUrls,
   judgeDeployLink,
   looksLikeFailureGuidance,
+  parseAppDirScan,
+  parseDeployStartedAt,
   parseDeployStatus,
   parseProjectInfo,
   permanentUrlFromLog,
@@ -41,6 +48,7 @@ import {
   TOOL_DEFINITIONS,
   checkDeployLink,
   deployToVercel,
+  detectAppDir,
   disableVercelProtection,
   executeTool,
   fetchVercelProject,
@@ -255,6 +263,10 @@ class FakeSandbox {
         return { pid: 777, stdout: '', stderr: '', exitCode: 0 };
       }
       this.foreground.push(command);
+      // Waktu mulai deploy (mtime file PID) — untuk deteksi deploy macet.
+      if (command.includes('stat -c %Y')) {
+        return { pid: 1, stdout: this.statSeconds ? `${this.statSeconds}\n` : '0\n', stderr: '', exitCode: 0 };
+      }
       // Pemeriksaan Vercel CLI (ensureVercel) dilaporkan siap lewat token eksplisit.
       if (command.includes('vercel@latest --version')) {
         return { pid: 1, stdout: '__AC_VERCEL_READY__ penanda\n', stderr: '', exitCode: 0 };
@@ -274,6 +286,9 @@ class FakeSandbox {
 
   /** true = proses deploy tiruan dianggap masih hidup. */
   processAlive = true;
+
+  /** Waktu (detik) mtime file PID — dipakai menguji deteksi deploy macet. */
+  statSeconds: number | null = null;
 
   /** true setelah perintah deploy benar-benar dijalankan di sandbox tiruan. */
   deployStarted = false;
@@ -465,6 +480,44 @@ console.log('\n[8] "tekan Deploy lagi" = MELANJUTKAN, bukan deploy baru');
   });
   await deployToVercel(noPid.asSandbox(), { token: TOKEN, waitMs: 20_000 });
   check('tanpa catatan PID => deploy baru (aman)', noPid.background.length === 1, JSON.stringify(noPid.background.map((b) => b.command)));
+
+  // Log MASIH KOSONG tetapi prosesnya hidup & baru: jangan mengulang deploy baru
+  // (itu membuang deployment yang sedang berjalan setiap kali dipanggil).
+  // `existingLog: '\n'` = file log ada tetapi isinya kosong (deploy belum mencetak apa pun).
+  // `logAfterPolls: 3` supaya pembacaan log PERTAMA (sebelum memutuskan
+  // melanjutkan/memulai) masih berisi log kosong, seperti deploy yang baru
+  // dijalankan dan belum mencetak apa pun.
+  const silentFresh = new FakeSandbox({
+    logAfterPolls: 3,
+    log: 'Production: https://baru-2.vercel.app [4s]\n' + DEPLOY_EXIT_PREFIX + '0\n',
+    existingLog: '\n',
+    pid: 555,
+  });
+  silentFresh.statSeconds = Math.floor(Date.now() / 1000) - 60;
+  const silentChunks: string[] = [];
+  const silentOutcome = await deployToVercel(silentFresh.asSandbox(), {
+    token: TOKEN,
+    waitMs: 20_000,
+    onOutput: (t) => silentChunks.push(t),
+  });
+  check('log kosong + proses hidup & baru => MELANJUTKAN', silentFresh.background.length === 0, JSON.stringify(silentFresh.background.map((b) => b.command)));
+  check('log yang kosong TIDAK dihapus/dibersihkan', !silentFresh.foreground.some((c) => c.includes(': > ' + DEPLOY_LOG_PATH)));
+  check('user diberi tahu melanjutkan', silentChunks.join('').includes('melanjutkan deploy yang sedang berjalan'));
+  check('deploy yang dilanjutkan tetap menghasilkan link', silentOutcome.state === 'done' && silentOutcome.url === 'https://baru-2.vercel.app', String(silentOutcome.url));
+
+  // Diam tanpa keluaran DAN sudah lewat ambang macet: mulai baru, kalau tidak
+  // statusnya menggantung selamanya.
+  const silentStale = new FakeSandbox({
+    logAfterPolls: 3,
+    log: 'Production: https://baru-3.vercel.app [4s]\n' + DEPLOY_EXIT_PREFIX + '0\n',
+    existingLog: '\n',
+    pid: 556,
+  });
+  silentStale.statSeconds = Math.floor(Date.now() / 1000) - 30 * 60;
+  const staleChunks: string[] = [];
+  await deployToVercel(silentStale.asSandbox(), { token: TOKEN, waitMs: 20_000, onOutput: (t) => staleChunks.push(t) });
+  check('diam + macet => deploy baru dijalankan', silentStale.background.length === 1, JSON.stringify(silentStale.background.map((b) => b.command)));
+  check('alasan memulai baru dijelaskan', staleChunks.join('').includes('tidak memberi keluaran sama sekali'), staleChunks.join('').slice(0, 160));
 }
 
 console.log('\n[9] link deploy terkunci Deployment Protection (Vercel Authentication)');
@@ -483,8 +536,31 @@ console.log('\n[9] link deploy terkunci Deployment Protection (Vercel Authentica
   check('200 = publik', judgeDeployLink({ status: 200 }).public);
   check('401 juga dianggap terkunci', judgeDeployLink({ status: 401 }).restricted);
   const notFound = judgeDeployLink({ status: 404, body: '404 NOT_FOUND This page doesn\u2019t exist' });
-  check('404 NOT_FOUND = deployment hilang (bukan terkunci)', notFound.kind === 'not-found' && !notFound.restricted, JSON.stringify(notFound));
+  check('404 halaman biasa = not-found', notFound.kind === 'not-found' && !notFound.restricted, JSON.stringify(notFound));
   check('request gagal = unreachable', judgeDeployLink({ status: 0, error: 'fetch failed' }).kind === 'unreachable');
+
+  // Sepasang 404 Vercel yang artinya BEDA (diambil apa adanya dari insiden nyata
+  // "sudah keluar link permanennya cuman eror").
+  const emptyDeployment = judgeDeployLink({
+    status: 404,
+    body: 'The page could not be found\n\nNOT_FOUND\nsin1::xgpvc-1791900354407-38ce97f969dc',
+  });
+  check('404 "The page could not be found" = deployment KOSONG', emptyDeployment.kind === 'empty-deployment', emptyDeployment.kind);
+  check(
+    'pesannya menyebut sub-folder / file hilang (penyebab tersering)',
+    /sub-folder/.test(deployLinkNote(emptyDeployment, { projectName: 'Sistem Kasir' }) ?? ''),
+    String(deployLinkNote(emptyDeployment, { projectName: 'Sistem Kasir' })),
+  );
+  const missing = judgeDeployLink({
+    status: 404,
+    body: 'The deployment could not be found on Vercel.\n\nDEPLOYMENT_NOT_FOUND\nsin1::75z2x-1791900377949-80691a6a57d8',
+  });
+  check('404 DEPLOYMENT_NOT_FOUND = hostname tanpa deployment', missing.kind === 'deployment-missing', missing.kind);
+  check(
+    'keduanya diberi pesan berbeda',
+    deployLinkNote(emptyDeployment, {}) !== deployLinkNote(missing, {}),
+    String(deployLinkNote(missing, {})),
+  );
 
   const info = buildProjectInfoRequest({ projectName: 'Sistem Kasir', scope: 'smoke-dev-builder' });
   check('API info proyek: nama di-slug-kan', info.url.includes('/v9/projects/sistem-kasir'), info.url);
@@ -647,6 +723,151 @@ console.log('\n[11] matikan proteksi lewat API Vercel (tombol di panel Preview)'
   // fetchVercelProject: respons error → null (jangan menebak status proyek).
   const none = await fetchVercelProject({ token: TOKEN, projectName: 'Sistem Kasir' });
   check('info proyek null saat API menolak', none === null, JSON.stringify(none));
+}
+
+console.log('\n[12] deteksi FOLDER APLIKASI sebelum deploy');
+{
+  // Insiden nyata: aplikasi dibuat di SUB-FOLDER, tombol Deploy mengirim folder
+  // akar proyek → Vercel membangun situs kosong (404 "The page could not be
+  // found" di semua alamat) padahal CLI bilang sukses.
+  const script = buildAppDirScanScript('/home/user/project');
+  check('skrip memindai folder akar + sub-folder', script.includes('/home/user/project') && script.includes('__AC_CAND__'), script.slice(0, 80));
+  check(
+    'skrip melewati node_modules/.next/.git',
+    script.includes('node_modules/') && script.includes('.next/') && script.includes('.git/'),
+    script.slice(0, 200),
+  );
+  check('skrip menandai tanda aplikasi (package.json/index.html)', /package\.json/.test(script) && /index\.html/.test(script));
+  check('folder dengan tanda kutip tetap aman', buildAppDirScanScript("/home/user/my'app").includes("'\\''"));
+
+  const scan = parseAppDirScan(
+    [
+      '__AC_CAND__ /home/user/project/sistem-kasir 42',
+      '__AC_CAND__ /home/user/project/landing 5',
+    ].join('\n'),
+  );
+  check('sub-folder terbaca + jumlah file', scan.candidates.length === 2 && scan.candidates[0].files === 42, JSON.stringify(scan));
+
+  const withRoot = parseAppDirScan('__AC_ROOT_APP__ 12\n');
+  check('folder akar berisi aplikasi terbaca', withRoot.rootHasApp === true, JSON.stringify(withRoot));
+  check('folder akar tidak ada = failed (jangan menyimpulkan)', parseAppDirScan('__AC_NO_ROOT__').failed === true);
+
+  const one = chooseAppDir({
+    scan: parseAppDirScan('__AC_CAND__ /home/user/project/sistem-kasir 42'),
+    root: '/home/user/project',
+  });
+  check('satu sub-folder => itu yang dipakai', one?.dir === '/home/user/project/sistem-kasir', JSON.stringify(one));
+  check('alasannya dijelaskan', /sub-folder/.test(one?.note ?? ''), String(one?.note));
+
+  const rootApp = chooseAppDir({ scan: withRoot, root: '/home/user/project' });
+  check('akarnya berisi aplikasi & tanpa sub-folder => folder akar', rootApp?.dir === '/home/user/project' && rootApp.source === 'root', JSON.stringify(rootApp));
+
+  // Paling dipercaya: folder tempat dev server terakhir dijalankan.
+  const byRegistry = chooseAppDir({
+    scan: parseAppDirScan('__AC_CAND__ /home/user/project/sistem-kasir 42\n__AC_CAND__ /home/user/project/landing 5'),
+    root: '/home/user/project',
+    registryCwds: ['/home/user/project/landing'],
+  });
+  check('catatan dev server menang atas tebakan ukuran', byRegistry?.dir === '/home/user/project/landing' && byRegistry.source === 'registry', JSON.stringify(byRegistry));
+
+  const many = chooseAppDir({
+    scan: parseAppDirScan('__AC_CAND__ /home/user/project/a 3\n__AC_CAND__ /home/user/project/b 40'),
+    root: '/home/user/project',
+  });
+  check('banyak sub-folder => yang file-nya terbanyak', many?.dir === '/home/user/project/b', JSON.stringify(many));
+  check('daftar sub-folder disebutkan', /\/home\/user\/project\/a/.test(many?.note ?? ''), String(many?.note));
+
+  const none = chooseAppDir({ scan: parseAppDirScan(''), root: '/home/user/project' });
+  check('tanpa tanda aplikasi => null (pemanggil memberi peringatan)', none === null, JSON.stringify(none));
+  check('pemindaian gagal => null (tidak menebak)', chooseAppDir({ scan: parseAppDirScan('__AC_NO_ROOT__'), root: '/home/user/project' }) === null);
+
+  // Terpasang di jalur deploy: sub-folder dipakai untuk MENGIRIM file ke Vercel.
+  const fake = new FakeSandbox({ logAfterPolls: 1, log: 'Production: https://x-1.vercel.app [3s]\n' + DEPLOY_EXIT_PREFIX + '0\n' });
+  (fake.commands.run as unknown as (c: string, o?: Record<string, unknown>) => Promise<unknown>) = async (
+    command: string,
+    options: { background?: boolean; cwd?: string; envs?: Record<string, string> } = {},
+  ) => {
+    if (options.background) return { pid: 777, stdout: '', stderr: '', exitCode: 0 };
+    fake.foreground.push(command);
+    if (command.includes('__AC_ROOT_APP__') || command.includes('__AC_CAND__')) {
+      return { pid: 1, stdout: '__AC_CAND__ /home/user/project/sistem-kasir 42\n', stderr: '', exitCode: 0 };
+    }
+    return { pid: 1, stdout: '', stderr: '', exitCode: 0 };
+  };
+  fake.fs.set('/home/user/.agentcloud-servers.json', JSON.stringify({ servers: [] }));
+  const detected = await detectAppDir(fake.asSandbox());
+  check('detectAppDir memilih sub-folder aplikasi', detected?.dir === '/home/user/project/sistem-kasir', JSON.stringify(detected));
+}
+
+console.log('\n[13] deploy belum selesai: agent BERHENTI (tidak mengulang polling)');
+{
+  // Insiden nyata: pesan tool berbunyi "panggil tool deploy sekali lagi untuk
+  // melanjutkan", jadi agent mengulanginya tiap langkah sampai batas langkah —
+  // chat user penuh puluhan baris "Deploy masih berjalan. Saya akan cek sekali lagi".
+  check('formatDuration: menit + detik', formatDuration(185_000) === '3 menit 5 detik', formatDuration(185_000));
+  check('formatDuration: detik saja', formatDuration(42_000) === '42 detik', formatDuration(42_000));
+  check('formatDuration: lebih dari sejam', /jam/.test(formatDuration(2 * 3_600_000)), formatDuration(2 * 3_600_000));
+
+  const script = deployStartedAtScript();
+  check('waktu mulai deploy dibaca dari mtime file PID', script.includes(DEPLOY_PID_PATH) && script.includes('stat -c %Y'), script);
+  check('detik diubah ke ms', parseDeployStartedAt('1791900000') === 1791900000000, String(parseDeployStartedAt('1791900000')));
+  check('nilai ms dipakai apa adanya', parseDeployStartedAt('1791900000123') === 1791900000123);
+  check('0 = tidak terbaca (jangan menebak)', parseDeployStartedAt('0') === null);
+  check('sampah = tidak terbaca', parseDeployStartedAt('bukan-angka') === null);
+
+  const runningMsg = deployStillRunningMessage({ ageMs: 150_000, stalled: false });
+  check('pesan "belum selesai" melarang memanggil tool lagi', /JANGAN panggil tool `deploy` lagi/.test(runningMsg), runningMsg);
+  check('pesan "belum selesai" TIDAK menyuruh mengulang polling', !/panggil tool deploy sekali lagi/i.test(runningMsg), runningMsg);
+  check('pesan "belum selesai" menyebut tombol Deploy ke user', /Deploy ke Vercel/.test(runningMsg), runningMsg);
+  const stalledMsg = deployStillRunningMessage({ ageMs: 20 * 60_000, stalled: true });
+  check('pesan macet menyebut durasinya', /20 menit/.test(stalledMsg), stalledMsg);
+  check('pesan macet menyatakan kemungkinan tertahan', /tertahan/.test(stalledMsg), stalledMsg);
+
+  // Lewat tool: pemanggilan pertama (belum macet) tetap harus menutup giliran.
+  process.env.DEPLOY_TOOL_WAIT_MS = '6000';
+  process.env.DEPLOY_TOOL_POLL_MS = '200';
+  const fake = new FakeSandbox({ logAfterPolls: 999, log: 'Uploading files…\n' });
+  fake.statSeconds = Math.floor(Date.now() / 1000) - 90; // deploy baru 90 detik
+  const ctx = {
+    sandbox: fake.asSandbox(),
+    sandboxId: 'stop-turn-test',
+    deploy: { token: TOKEN, scope: '', projectName: 'sistem-kasir' },
+  };
+  const first = await executeTool(ctx, 'deploy', {});
+  check('belum selesai => stopTurn diminta', first.stopTurn === true, JSON.stringify({ stopTurn: first.stopTurn, out: first.output.slice(0, 160) }));
+  check('keluaran memuat deploy_belum_selesai', /deploy_belum_selesai/.test(first.output), first.output.slice(0, 300));
+  check('keluaran tidak lagi menyuruh memanggil ulang', !/panggil tool deploy sekali lagi untuk melanjutkan/.test(first.output), first.output.slice(0, 300));
+  check('durasi deploy dilaporkan apa adanya', /berjalan_sejak: 1 menit/.test(first.output), first.output.slice(0, 300));
+
+  // Pemanggilan kedua di giliran yang sama: dianggap macet, tetap berhenti.
+  const second = await executeTool({ ...ctx, sandbox: fake.asSandbox() }, 'deploy', {});
+  check('pemanggilan kedua => deploy_macet', /deploy_macet/.test(second.output), second.output.slice(0, 300));
+  check('pemanggilan kedua tetap stopTurn', second.stopTurn === true);
+
+  // Deploy yang berhasil me-reset hitungan: pemanggilan berikutnya bukan "macet".
+  const okFake = new FakeSandbox({
+    logAfterPolls: 1,
+    log: `✅  Production: https://kasir-app.vercel.app [9s]\n${DEPLOY_EXIT_PREFIX}0\n`,
+  });
+  okFake.statSeconds = Math.floor(Date.now() / 1000) - 30;
+  const okCtx = { sandbox: okFake.asSandbox(), sandboxId: 'stop-turn-test', deploy: { token: TOKEN, scope: '', projectName: 'kasir-app' } };
+  const okResult = await executeTool(okCtx, 'deploy', {});
+  check('deploy sukses tidak meminta berhenti', okResult.ok === true && !okResult.stopTurn, JSON.stringify({ ok: okResult.ok }));
+  const afterReset = await executeTool(ctx, 'deploy', {});
+  check('setelah sukses, hitungan pemanggilan direset', /deploy_belum_selesai/.test(afterReset.output), afterReset.output.slice(0, 200));
+
+  // Deploy yang sudah terlalu lama: langsung dinyatakan macet walau baru dipanggil.
+  const oldFake = new FakeSandbox({ logAfterPolls: 999, log: 'Uploading…\n' });
+  oldFake.statSeconds = Math.floor(Date.now() / 1000) - 30 * 60;
+  const old = await executeTool(
+    { sandbox: oldFake.asSandbox(), sandboxId: 'stale-deploy', deploy: { token: TOKEN, scope: '', projectName: 'kasir' } },
+    'deploy',
+    {},
+  );
+  check('deploy 30 menit => langsung dianggap macet', /deploy_macet/.test(old.output), old.output.slice(0, 200));
+
+  delete process.env.DEPLOY_TOOL_WAIT_MS;
+  delete process.env.DEPLOY_TOOL_POLL_MS;
 }
 
 console.log(`\nhasil: ${pass} ok, ${fail} gagal`);

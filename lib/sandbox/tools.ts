@@ -37,16 +37,25 @@ import {
   DEPLOY_LOG_PATH,
   DEPLOY_PID_PATH,
   DEPLOY_POLL_MS,
+  DEPLOY_STALL_MS,
   DEPLOY_TIMEOUT_MS,
+  DEPLOY_TOOL_MAX_CALLS,
   VERCEL_MARKER,
   buildDeployCommand,
+  buildAppDirScanScript,
   buildDisableProtectionRequest,
   buildLinkCommand,
   buildProjectInfoRequest,
+  chooseAppDir,
   deployLinkNote,
   deployShellCommand,
+  deployStartedAtScript,
+  deployStillRunningMessage,
   explainDeployError,
+  formatDuration,
   judgeDeployLink,
+  parseAppDirScan,
+  parseDeployStartedAt,
   parseDeployStatus,
   parseProcessAlive,
   parseProjectInfo,
@@ -77,6 +86,15 @@ export type ToolResult = {
   output: string;
   previewUrl?: string;
   port?: number;
+  /**
+   * true = loop agent harus MENUTUP giliran ini setelah tool dieksekusi.
+   *
+   * Dipakai `deploy`: kalau deploy belum selesai/macet, agent TIDAK boleh terus
+   * memanggil tool yang sama (insiden nyata: chat user penuh puluhan baris
+   * "Deploy masih berjalan" sampai batas langkah) — hasilnya harus disampaikan
+   * ke user, bukan diulang.
+   */
+  stopTurn?: boolean;
   /**
    * Screenshot hasil `browser_check` (data URL JPEG). Dikirim ke model HANYA
    * kalau modelnya mendukung gambar; UI menampilkannya selama sesi berjalan.
@@ -680,6 +698,12 @@ export type DeployOutcome = {
   protected?: boolean;
   /** Penjelasan + cara mematikan proteksinya (siap ditampilkan). */
   protectionNote?: string | null;
+  /**
+   * Masalah lain yang terbukti dari pemeriksaan link (mis. deployment tidak
+   * menyajikan halaman apa pun → 404 di semua alamat). Bukan kegagalan deploy,
+   * tapi link-nya belum berguna bagi pengunjung.
+   */
+  warningNote?: string | null;
   /** Alias produksi stabil milik proyek (kalau API Vercel memberikannya). */
   alias?: string | null;
   /** Hasil pemeriksaan link dari sisi server (diagnosa). */
@@ -712,6 +736,32 @@ export async function checkDeployLink(url: string, timeoutMs = 12_000): Promise<
   } catch (err) {
     return judgeDeployLink({ status: 0, error: err instanceof Error ? err.message : String(err) });
   }
+}
+
+/**
+ * Temukan folder aplikasi di dalam sandbox sebelum deploy.
+ *
+ * Insiden nyata: aplikasi dibuat di SUB-FOLDER sementara tombol Deploy mengirim
+ * folder akar proyek → Vercel membangun situs kosong yang menjawab 404 di semua
+ * alamat ("The page could not be found"), padahal CLI melaporkan
+ * "✅ Production: …" seolah sukses. Folder yang pernah dipakai dev server
+ * (tercatat di registry sandbox) dipakai sebagai bukti utama, bukan tebakan.
+ */
+export async function detectAppDir(
+  sandbox: Sandbox,
+  root: string = SANDBOX_PROJECT_DIR,
+): Promise<{ dir: string; source: string; files: number; note: string } | null> {
+  const [scanResult, registry] = await Promise.all([
+    runCommand(sandbox, buildAppDirScanScript(root), { cwd: '/', timeoutMs: 30_000 }).catch(() => null),
+    readServerRegistry(sandbox).catch(() => [] as ServerRecord[]),
+  ]);
+  if (!scanResult) return null;
+  const scan = parseAppDirScan(`${scanResult.stdout ?? ''}\n${scanResult.stderr ?? ''}`);
+  return chooseAppDir({
+    scan,
+    root,
+    registryCwds: registry.map((record) => record.cwd).filter((value): value is string => Boolean(value)),
+  });
 }
 
 /**
@@ -861,6 +911,40 @@ async function isProcessAlive(sandbox: Sandbox, pid: number): Promise<boolean> {
   return parseProcessAlive(`${res?.stdout ?? ''}\n${res?.stderr ?? ''}`);
 }
 
+/**
+ * Anggaran tunggu tool `deploy` di dalam satu langkah agent.
+ *
+ * Bisa di-override lewat env HANYA untuk pengujian (`DEPLOY_TOOL_WAIT_MS` /
+ * `DEPLOY_TOOL_POLL_MS`), sama seperti override lain di proyek ini
+ * (mis. `VISION_MODELS`, `OPENROUTER_BASE_URL`) — supaya uji jalur "deploy belum
+ * selesai" tidak perlu menunggu 2 menit sungguhan.
+ */
+function deployToolTiming(callCount: number): { waitMs: number; pollMs: number | undefined } {
+  const waitOverride = Number(process.env.DEPLOY_TOOL_WAIT_MS);
+  const pollOverride = Number(process.env.DEPLOY_TOOL_POLL_MS);
+  return {
+    waitMs: Number.isFinite(waitOverride) && waitOverride > 0 ? waitOverride : callCount === 1 ? 120_000 : 60_000,
+    pollMs: Number.isFinite(pollOverride) && pollOverride > 0 ? pollOverride : undefined,
+  };
+}
+
+/**
+ * Sejak kapan deploy (yang tercatat) berjalan — dari mtime file PID di sandbox,
+ * jadi tetap benar walau instance server/serverless-nya berganti.
+ */
+async function readDeployStartedAt(sandbox: Sandbox): Promise<number | null> {
+  const res = await runCommand(sandbox, deployStartedAtScript(), { cwd: '/', timeoutMs: 15_000 }).catch(() => null);
+  return parseDeployStartedAt(`${res?.stdout ?? ''}`);
+}
+
+/**
+ * Berapa kali tool `deploy` dipanggil pada giliran (request) ini, per sandbox.
+ *
+ * Modul-murni di dalam proses: satu request chat memakai satu instance, jadi ini
+ * cukup untuk mencegah agent mengulang polling tanpa henti dalam satu giliran.
+ */
+const deployToolCalls = new Map<string, number>();
+
 export async function deployToVercel(
   sandbox: Sandbox,
   options: {
@@ -870,6 +954,8 @@ export async function deployToVercel(
     projectName?: string;
     /** Anggaran waktu menunggu di dalam satu request (ms). */
     waitMs?: number;
+    /** Jeda antar pemeriksaan log (ms) — hanya di-override saat pengujian. */
+    pollMs?: number;
     onOutput?: (text: string) => void;
   },
 ): Promise<DeployOutcome> {
@@ -902,13 +988,32 @@ export async function deployToVercel(
   const priorStatus = parseDeployStatus(priorLog, { token });
   const priorPid = await readDeployPid(sandbox);
   const priorAlive = priorPid ? await isProcessAlive(sandbox, priorPid) : false;
-  const resuming = Boolean(priorLog.trim()) && priorStatus.state === 'running' && priorAlive;
+  /**
+   * Jangan mengulang deploy baru hanya karena log-nya MASIH KOSONG.
+   *
+   * Insiden nyata: syarat "melanjutkan" dulu menuntut log sudah ada isinya, jadi
+   * pemanggilan berikutnya (agent/polling) menganggap tidak ada deploy berjalan
+   * dan MENJALANKAN ULANG `vercel deploy` sambil menghapus lognya — deployment
+   * yang sedang berjalan dibuang berulang kali, dan statusnya tak pernah selesai
+   * (pola thrash yang sama dengan preview dulu). Sekarang proses yang masih hidup
+   * = dilanjutkan; deploy yang diam tanpa keluaran BARU dimulai ulang kalau sudah
+   * melewati ambang macet, supaya tidak menggantung selamanya.
+   */
+  const priorStartedAt = await readDeployStartedAt(sandbox);
+  const priorAgeMs = priorStartedAt ? Date.now() - priorStartedAt : 0;
+  const silentAndStale = !priorLog.trim() && priorAgeMs > DEPLOY_STALL_MS;
+  const resuming = Boolean(priorPid) && priorAlive && priorStatus.state === 'running' && !silentAndStale;
 
   let command = buildDeployCommand({ scope: options.scope });
 
   if (resuming) {
     options.onOutput?.('[melanjutkan deploy yang sedang berjalan di sandbox…]\n');
   } else {
+    if (priorAlive && silentAndStale) {
+      options.onOutput?.(
+        `[deploy sebelumnya tidak memberi keluaran sama sekali selama ${formatDuration(priorAgeMs)} — memulai deploy baru…]\n`,
+      );
+    }
     // Penautan folder → nama proyek dijalankan lebih dulu. Opsi `--name` pada
     // `deploy` sudah deprecated, dan tanpa penautan nama proyek akan mengikuti
     // nama folder sandbox ("project") sehingga linknya tidak berarti.
@@ -953,7 +1058,7 @@ export async function deployToVercel(
   let sent = resuming ? Math.max(0, priorLog.length - 4_000) : 0;
 
   for (;;) {
-    await new Promise((resolve) => setTimeout(resolve, DEPLOY_POLL_MS));
+    await new Promise((resolve) => setTimeout(resolve, options.pollMs ?? DEPLOY_POLL_MS));
     log = await sandbox.files.read(DEPLOY_LOG_PATH).then(
       (value) => redactSecrets(String(value ?? ''), token),
       () => log,
@@ -988,6 +1093,7 @@ export async function deployToVercel(
   let link: DeployLinkVerdict | null = null;
   let protectedFlag = false;
   let protectionNote: string | null = null;
+  let warningNote: string | null = null;
 
   if (status.state === 'done' && url) {
     const info = await fetchVercelProject({ token, scope: options.scope, projectName });
@@ -999,7 +1105,7 @@ export async function deployToVercel(
       // Link yang menjawab (aplikasi ATAU halaman login Vercel) dipakai; kalau
       // tidak ada yang menjawab, yang terakhir dipertahankan agar user tetap
       // melihat link apa adanya beserta catatan masalahnya.
-      if (verdict.kind !== 'unreachable' && verdict.kind !== 'not-found') {
+      if (verdict.kind !== 'unreachable' && verdict.kind !== 'not-found' && verdict.kind !== 'deployment-missing' && verdict.kind !== 'empty-deployment') {
         url = candidate;
         break;
       }
@@ -1010,6 +1116,11 @@ export async function deployToVercel(
         link?.restricted && link.kind === 'restricted'
           ? deployLinkNote(link, { projectName, scope: options.scope })
           : vercelAuthenticationNote({ projectName, scope: options.scope });
+    } else if (link && !link.public) {
+      // Deployment "sukses" tapi halamannya tidak ada / server error: jangan
+      // diamkan — inilah bentuk nyata "link permanennya error" yang dilaporkan
+      // user padahal CLI bilang sukses.
+      warningNote = deployLinkNote(link, { projectName, scope: options.scope });
     }
   }
 
@@ -1023,6 +1134,7 @@ export async function deployToVercel(
     issue,
     protected: protectedFlag,
     protectionNote,
+    warningNote,
     alias,
     link,
   };
@@ -1484,29 +1596,79 @@ export async function executeTool(ctx: ToolContext, name: string, rawArgs: Recor
         const cli = await ensureVercel(ctx.sandbox, ctx.onOutput);
         if (!cli.ok) return { ok: false, output: cli.message };
 
+        // Folder aplikasi: kalau agent tidak menyebut `cwd`, cari sendiri folder
+        // yang benar (aplikasi sering dibuat di SUB-FOLDER, dan mengirim folder
+        // akar proyek ke Vercel menghasilkan situs kosong yang 404 di semua alamat).
+        let appDirNote = '';
+        let deployCwd = args.cwd ? resolvePath(String(args.cwd)) : '';
+        if (!deployCwd) {
+          const detected = await detectAppDir(ctx.sandbox);
+          if (detected) {
+            deployCwd = detected.dir;
+            appDirNote = `folder_aplikasi: ${relPath(detected.dir, SANDBOX_PROJECT_DIR) || '.'} (${detected.note})`;
+          } else {
+            deployCwd = SANDBOX_PROJECT_DIR;
+            appDirNote =
+              'peringatan: tidak ditemukan package.json/index.html di folder proyek maupun sub-foldernya — ' +
+              'kemungkinan file aplikasinya hilang; deploy sekarang akan menghasilkan situs kosong (404 di semua alamat).';
+          }
+        }
+        ctx.onOutput?.(`[deploy] ${args.cwd ? `folder aplikasi: ${deployCwd}` : appDirNote}\n`);
+
+        /**
+         * Berapa kali tool ini dipanggil di giliran ini + sudah berapa lama deploy
+         * berjalan. Keduanya diperlukan supaya agent tidak terjebak mengulang
+         * "Deploy masih berjalan. Saya akan cek sekali lagi" tanpa henti (insiden
+         * nyata: chat user penuh puluhan baris seperti itu sampai batas langkah).
+         */
+        const callCount = (deployToolCalls.get(ctx.sandboxId) ?? 0) + 1;
+        deployToolCalls.set(ctx.sandboxId, callCount);
+        const startedAt = await readDeployStartedAt(ctx.sandbox);
+        const ageMs = startedAt ? Date.now() - startedAt : 0;
+        const timing = deployToolTiming(callCount);
+
         const outcome = await deployToVercel(ctx.sandbox, {
           token: deployCfg.token,
           scope: deployCfg.scope,
-          cwd,
+          cwd: deployCwd,
           projectName,
-          waitMs: 150_000,
+          // Pemanggilan lanjutan menunggu lebih pendek: yang pertama sudah
+          // memakan sebagian besar anggaran durasi fungsi hosting.
+          waitMs: timing.waitMs,
+          pollMs: timing.pollMs,
           onOutput: ctx.onOutput,
         });
 
+        if (outcome.state !== 'running') deployToolCalls.delete(ctx.sandboxId);
+
+        // Belum selesai: beri tahu sekali, lalu WAJIB berhenti (jangan mengulang).
+        const stalled = outcome.timedOut && (ageMs > DEPLOY_STALL_MS || callCount >= DEPLOY_TOOL_MAX_CALLS);
+        const stopNotice = outcome.timedOut
+          ? deployStillRunningMessage({ ageMs, stalled, url: outcome.url })
+          : '';
+
         const lines = [
           `deploy_status: ${outcome.state}${outcome.timedOut ? ' (masih berjalan)' : ''}`,
-          `cwd: ${relPath(cwd, SANDBOX_PROJECT_DIR) || '.'}`,
+          `cwd: ${relPath(deployCwd, SANDBOX_PROJECT_DIR) || '.'}`,
+          appDirNote,
+          outcome.timedOut && ageMs ? `berjalan_sejak: ${formatDuration(ageMs)}` : '',
           outcome.url ? `link_permanen: ${outcome.url}` : '',
           outcome.state === 'done'
             ? 'status: SELESAI - link ini permanen dan tetap hidup walau sandbox dimatikan'
             : outcome.state === 'failed'
               ? `masalah: ${outcome.error ?? 'deploy gagal'}`
-              : 'status: BELUM SELESAI - panggil tool deploy sekali lagi untuk melanjutkan (deploy tetap berjalan di sandbox)',
+              : 'status: BELUM SELESAI - link belum ada; JANGAN panggil tool ini lagi di giliran ini',
+          stopNotice,
           // Link yang hidup tapi terkunci Deployment Protection BUKAN link yang
           // bisa dibagikan: pengunjung hanya melihat login/404 Vercel. Beri tahu
           // agent apa adanya + cara mematikannya, jangan bilang "selesai" saja.
           outcome.protected
             ? `link_terkunci: Deployment Protection (Vercel Authentication) aktif — pengunjung lain hanya melihat halaman login/404 Vercel. ${outcome.protectionNote ?? ''}`.trim()
+            : '',
+          // Deployment "sukses" tapi tidak menyajikan halaman (404 di semua
+          // alamat) — beri tahu agent penyebab terseringnya, jangan bilang selesai.
+          outcome.warningNote
+            ? `masalah_link: ${outcome.warningNote}`
             : '',
           // Vercel membangun di sisinya; kalau build-nya gagal (mis. paket belum
           // terdaftar di package.json) agent diberi tahu cara mereproduksinya
@@ -1519,7 +1681,14 @@ export async function executeTool(ctx: ToolContext, name: string, rawArgs: Recor
           outcome.log ? `logs:\n${truncate(outcome.log, 2_000)}` : '',
         ].filter(Boolean);
 
-        return { ok: outcome.state === 'done', output: lines.join('\n'), previewUrl: outcome.url ?? undefined };
+        return {
+          ok: outcome.state === 'done',
+          output: lines.join('\n'),
+          previewUrl: outcome.url ?? undefined,
+          // Belum selesai => tutup giliran ini. Tanpa ini, agent mengulang
+          // pemanggilan yang sama di setiap langkah (lihat DEPLOY_TOOL_MAX_CALLS).
+          stopTurn: outcome.timedOut,
+        };
       }
 
       default:

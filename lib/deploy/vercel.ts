@@ -58,6 +58,70 @@ export const DEPLOY_POLL_MS = 3_000;
 /** Penanda akhir proses (kode keluar CLI) yang ditulis ke file log. */
 export const DEPLOY_EXIT_PREFIX = '__AC_DEPLOY_EXIT__';
 
+/**
+ * Batas jumlah pemanggilan tool `deploy` DALAM SATU giliran agent.
+ *
+ * Insiden nyata (Okt 2026): pesan hasil tool berbunyi "panggil tool deploy sekali
+ * lagi untuk melanjutkan", jadi agent mengulanginya di setiap langkah — chat user
+ * penuh puluhan baris "Deploy masih berjalan. Saya akan cek sekali lagi" sampai
+ * batas langkah (12) tercapai, tanpa pernah memberi jawaban.
+ */
+export const DEPLOY_TOOL_MAX_CALLS = 2;
+
+/**
+ * Setelah deploy berjalan selama ini, ia dianggap MACET (bukan "sedang sibuk"):
+ * deploy Vercel normal selesai dalam 1-3 menit. Kalau prosesnya masih "hidup"
+ * tetapi tidak pernah selesai (mis. menunggu input, jaringan sandbox putus),
+ * agent harus BERHENTI menunggu dan menyerahkannya ke user + panel Preview.
+ */
+export const DEPLOY_STALL_MS = 8 * 60_000;
+
+/** Perintah membaca waktu mulai deploy (mtime file PID di dalam sandbox). */
+export function deployStartedAtScript(path: string = DEPLOY_PID_PATH): string {
+  return `stat -c %Y ${path} 2>/dev/null || echo 0`;
+}
+
+/** Epoch-ms kapan deploy dimulai (null kalau tidak terbaca). */
+export function parseDeployStartedAt(output: string): number | null {
+  const value = Number(String(output || '').trim().split(/\s+/).pop());
+  if (!Number.isFinite(value) || value <= 0) return null;
+  // `stat -c %Y` = detik; nilainya bisa juga sudah ms bila tidak masuk akal kecil.
+  return value > 1e12 ? value : value * 1000;
+}
+
+/** "3 menit 12 detik" — dipakai di pesan status deploy. */
+export function formatDuration(ms: number): string {
+  const total = Math.max(0, Math.round(ms / 1000));
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  if (minutes >= 60) return `${Math.floor(minutes / 60)} jam ${minutes % 60} menit`;
+  if (minutes > 0) return `${minutes} menit ${seconds} detik`;
+  return `${seconds} detik`;
+}
+
+/**
+ * Pesan penutup saat deploy belum selesai dan agent TIDAK boleh memanggil tool
+ * `deploy` lagi di giliran ini: jelaskan apa yang terjadi + apa yang harus
+ * dilakukan user (bukan menyuruh agent mengulang polling).
+ */
+export function deployStillRunningMessage(options: { ageMs: number; stalled: boolean; url?: string | null }): string {
+  const age = formatDuration(options.ageMs);
+  if (options.stalled) {
+    return (
+      `deploy_macet: deploy sudah berjalan ${age} tanpa selesai — kemungkinan prosesnya tertahan di sisi Vercel/sandbox ` +
+      '(bukan build yang sedang sibuk). JANGAN panggil tool `deploy` lagi. Laporkan ke user apa adanya: deploy belum ' +
+      'menghasilkan link, tunjukkan beberapa baris log terakhir sebagai bukti, dan sarankan menekan tombol ' +
+      '**Deploy ke Vercel** sekali lagi di panel Preview (panel itu memantau sendiri) atau menunggu lalu mencoba lagi.'
+    );
+  }
+  return (
+    `deploy_belum_selesai: deploy masih berjalan ${age} di Vercel dan belum menghasilkan link. ` +
+    'JANGAN panggil tool `deploy` lagi di giliran ini dan jangan mengulang kalimat yang sama. ' +
+    'Laporkan ke user: linknya belum bisa dipastikan, panel Preview tetap memantau sendiri, dan user bisa menekan ' +
+    'tombol **Deploy ke Vercel** sekali lagi untuk mengambil linknya begitu selesai. Lanjutkan hanya kalau user meminta.'
+  );
+}
+
 /** Nama proyek Vercel yang sah: huruf kecil, angka, dan tanda hubung. */
 export function toVercelProjectName(raw: string): string {
   const cleaned = (raw || '')
@@ -326,7 +390,16 @@ export type DeployLinkVerdict = {
   /** true = link dikunci Deployment Protection (login Vercel / password). */
   restricted: boolean;
   /** Klasifikasi untuk pesan & penanganan. */
-  kind: 'public' | 'redirect' | 'vercel-authentication' | 'restricted' | 'not-found' | 'server-error' | 'unreachable';
+  kind:
+    | 'public'
+    | 'redirect'
+    | 'vercel-authentication'
+    | 'restricted'
+    | 'not-found'
+    | 'deployment-missing'
+    | 'empty-deployment'
+    | 'server-error'
+    | 'unreachable';
   status: number;
   reason: string | null;
 };
@@ -382,12 +455,39 @@ export function judgeDeployLink(probe: DeployLinkProbe): DeployLinkVerdict {
     return { public: true, restricted: false, kind: 'redirect', status, reason: null };
   }
   if (status === 404) {
+    /**
+     * Dua jenis 404 Vercel yang BEDA artinya (dibuktikan dari insiden nyata):
+     *  - "The deployment could not be found on Vercel" + `DEPLOYMENT_NOT_FOUND`
+     *    → hostname itu tidak lagi terhubung ke deployment apa pun.
+     *  - "The page could not be found" + `NOT_FOUND` (plain text, SEMUA path
+     *    termasuk /favicon.ico) → deployment ADA tapi tidak menyajikan halaman
+     *    apa pun: biasanya folder yang dikirim ke Vercel bukan folder aplikasi
+     *    (mis. aplikasi hidup di sub-folder) atau folder aplikasinya kosong.
+     */
+    if (/deployment could not be found|deployment_not_found/i.test(body)) {
+      return {
+        public: false,
+        restricted: false,
+        kind: 'deployment-missing',
+        status,
+        reason: 'Deployment tidak lagi terhubung ke hostname ini (DEPLOYMENT_NOT_FOUND)',
+      };
+    }
+    if (/the page could not be found|page could not be found/i.test(body)) {
+      return {
+        public: false,
+        restricted: false,
+        kind: 'empty-deployment',
+        status,
+        reason: 'Deployment tidak menyajikan halaman apa pun (Vercel: "The page could not be found")',
+      };
+    }
     return {
       public: false,
       restricted: false,
       kind: 'not-found',
       status,
-      reason: /not_found|doesn.t exist/.test(body) ? 'Deployment tidak ditemukan (sudah dihapus?)' : 'Halaman 404',
+      reason: /not_found|doesn.t exist/.test(body) ? 'Halaman 404 dari Vercel' : 'Halaman 404',
     };
   }
   return {
@@ -430,8 +530,21 @@ export function deployLinkNote(
       return vercelAuthenticationNote(options);
     case 'restricted':
       return `Link ini masih dilindungi (password/proteksi Vercel), jadi belum bisa dibuka pengunjung. Periksa Deployment Protection: ${settings}`;
+    case 'deployment-missing':
+      return (
+        'Hostname ini tidak lagi terhubung ke deployment apa pun (Vercel: DEPLOYMENT_NOT_FOUND / ' +
+        '"The deployment could not be found"). Jalankan deploy lagi — kalau tetap, buka proyeknya di dashboard Vercel ' +
+        'dan pastikan deployment produksinya ada & sehat.'
+      );
+    case 'empty-deployment':
+      return (
+        'Deployment berhasil dibuat, TAPI tidak menyajikan halaman apa pun: Vercel menjawab "The page could not be found" ' +
+        'untuk SEMUA alamat (termasuk /favicon.ico). Penyebab tersering: folder yang dikirim ke Vercel bukan folder aplikasi ' +
+        '(mis. aplikasi ada di sub-folder sementara akar proyeknya kosong), atau file aplikasinya sudah tidak ada di sandbox. ' +
+        'Periksa folder aplikasi (harus ada package.json atau index.html) lalu deploy lagi.'
+      );
     case 'not-found':
-      return 'Deployment sudah tidak ada di Vercel (mungkin dihapus atau di-rollback), jadi linknya 404. Jalankan deploy lagi.';
+      return 'Halaman ini tidak ada di aplikasi yang dideploy (404 dari aplikasi), jadi pengunjung melihat halaman 404. Periksa alamat awalnya lalu deploy lagi.';
     case 'server-error':
       return `Deployment menjawab HTTP ${verdict.status}. Cek log build di dashboard Vercel.`;
     case 'unreachable':
@@ -439,6 +552,140 @@ export function deployLinkNote(
     default:
       return null;
   }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Menemukan FOLDER APLIKASI di dalam sandbox                                   */
+/* -------------------------------------------------------------------------- */
+
+export type AppDirCandidate = {
+  /** Path absolut folder yang berisi tanda aplikasi (package.json/index.html). */
+  dir: string;
+  /** Jumlah file di folder itu (tanpa node_modules/.next). */
+  files: number;
+};
+
+export type AppDirScan = {
+  /** true = folder akar proyek sendiri sudah berisi package.json/index.html. */
+  rootHasApp: boolean;
+  /** Folder-folder calon (kedalaman 1-2) yang berisi tanda aplikasi. */
+  candidates: AppDirCandidate[];
+  /** true = perintah pemindaian gagal dijalankan (jangan menyimpulkan apa pun). */
+  failed: boolean;
+};
+
+/**
+ * Skrip pemindaian folder aplikasi (dijalankan DI DALAM sandbox, satu perintah).
+ *
+ * Latar belakang insiden nyata: aplikasi user sering dibuat di SUB-FOLDER
+ * (`/home/user/project/sistem-kasir`) sementara tombol Deploy mengirim folder
+ * akarnya. Vercel membangun "situs kosong" yang menjawab 404 ("The page could
+ * not be found") di SEMUA alamat — user melihatnya sebagai "link permanen error"
+ * padahal CLI melaporkan sukses.
+ */
+export function buildAppDirScanScript(root: string): string {
+  const dir = shellSingleQuote(root);
+  return `
+set -u
+ROOT=${dir}
+cd "$ROOT" 2>/dev/null || { echo "__AC_NO_ROOT__"; exit 0; }
+is_app() { [ -f "$1/package.json" ] || [ -f "$1/index.html" ] || [ -f "$1/index.htm" ] || ls "$1"/*.html >/dev/null 2>&1; }
+count_files() { find "$1" -type f -not -path '*/node_modules/*' -not -path '*/.next/*' -not -path '*/.git/*' 2>/dev/null | wc -l | tr -d ' '; }
+if is_app "$ROOT"; then echo "__AC_ROOT_APP__ $(count_files "$ROOT")"; fi
+for d in "$ROOT"/*/; do
+  [ -d "$d" ] || continue
+  case "$d" in */node_modules/|*/.next/|*/.git/|*/dist/|*/build/|*/.vercel/|*/coverage/) continue;; esac
+  if is_app "$d"; then echo "__AC_CAND__ \${d%/} $(count_files "$d")"; fi
+  for d2 in "$d"*/; do
+    [ -d "$d2" ] || continue
+    case "$d2" in */node_modules/|*/.next/|*/.git/|*/dist/|*/build/|*/.vercel/|*/coverage/) continue;; esac
+    if is_app "$d2"; then echo "__AC_CAND__ \${d2%/} $(count_files "$d2")"; fi
+  done
+done
+`.trim();
+}
+
+function shellSingleQuote(value: string): string {
+  return `'${(value || '').replace(/'/g, `'\\''`)}'`;
+}
+
+/** Baca keluaran skrip pemindaian. */
+export function parseAppDirScan(output: string): AppDirScan {
+  const text = output || '';
+  if (text.includes('__AC_NO_ROOT__')) return { rootHasApp: false, candidates: [], failed: true };
+  let rootHasApp = false;
+  const candidates: AppDirCandidate[] = [];
+  for (const line of text.split('\n').map((l) => l.trim()).filter(Boolean)) {
+    const rootMatch = line.match(/^__AC_ROOT_APP__\s+(\d+)?/);
+    if (rootMatch) {
+      rootHasApp = true;
+      continue;
+    }
+    const candMatch = line.match(/^__AC_CAND__\s+(\S+)\s+(\d+)?/);
+    if (candMatch) candidates.push({ dir: candMatch[1], files: Number(candMatch[2] ?? 0) || 0 });
+  }
+  return { rootHasApp, candidates, failed: false };
+}
+
+/**
+ * Pilih folder yang akan dikirim ke Vercel.
+ *
+ * Urutan keputusan (dari yang paling pasti):
+ *  1. folder tempat dev server terakhir dijalankan (catatan registry di sandbox) —
+ *     itu BUKTI aplikasinya hidup di sana, bukan tebakan;
+ *  2. folder akar proyek, kalau akarnya memang berisi aplikasi;
+ *  3. satu-satunya folder calon;
+ *  4. folder calon dengan file terbanyak (kasus banyak sub-proyek).
+ * Mengembalikan null kalau tidak ada tanda aplikasi sama sekali — pemanggil
+ * sebaiknya memperingatkan user alih-alih mengirim folder kosong ke Vercel.
+ */
+export function chooseAppDir(input: {
+  scan: AppDirScan;
+  root: string;
+  /** cwd dev server yang pernah dicatat di sandbox (paling dipercaya). */
+  registryCwds?: string[];
+}): { dir: string; source: 'registry' | 'root' | 'candidate'; files: number; note: string } | null {
+  const { scan, root } = input;
+  if (scan.failed) return null;
+  const registry = (input.registryCwds ?? []).filter(Boolean);
+  const normalize = (p: string) => p.replace(/\/+$/, '');
+  const rootPath = normalize(root);
+  const candidates = scan.candidates.map((c) => ({ ...c, dir: normalize(c.dir) }));
+
+  for (const cwd of registry.map(normalize)) {
+    if (cwd === rootPath && scan.rootHasApp) {
+      return { dir: rootPath, source: 'registry', files: 0, note: `folder aplikasi = folder akar proyek (tempat dev server dijalankan: ${cwd})` };
+    }
+    const hit = candidates.find((c) => c.dir === cwd);
+    if (hit) {
+      return { dir: hit.dir, source: 'registry', files: hit.files, note: `folder aplikasi terdeteksi dari catatan dev server: ${hit.dir}` };
+    }
+  }
+
+  if (scan.rootHasApp && candidates.length === 0) {
+    return { dir: rootPath, source: 'root', files: 0, note: 'folder akar proyek sudah berisi aplikasi' };
+  }
+  if (!scan.rootHasApp && candidates.length === 1) {
+    return {
+      dir: candidates[0].dir,
+      source: 'candidate',
+      files: candidates[0].files,
+      note: `aplikasi ada di sub-folder: ${candidates[0].dir} (folder akar proyek tidak berisi aplikasi)`,
+    };
+  }
+  if (scan.rootHasApp) {
+    return { dir: rootPath, source: 'root', files: 0, note: 'folder akar proyek dipakai (ada juga sub-folder berisi aplikasi)' };
+  }
+  if (candidates.length > 1) {
+    const best = [...candidates].sort((a, b) => b.files - a.files)[0];
+    return {
+      dir: best.dir,
+      source: 'candidate',
+      files: best.files,
+      note: `beberapa sub-folder berisi aplikasi (${candidates.map((c) => c.dir).join(', ')}); dipakai yang file-nya terbanyak: ${best.dir}`,
+    };
+  }
+  return null;
 }
 
 /** Baris error khas CLI Vercel. */

@@ -52,6 +52,8 @@ class FakeSandbox {
   fs = new Map<string, string>();
   /** Perintah background yang benar-benar dijalankan (bukti tool dieksekusi). */
   starts: string[] = [];
+  /** true = deploy tiruan tidak pernah selesai (dipakai uji "berhenti, jangan ulang"). */
+  deployNeverFinishes = false;
 
   files = {
     read: async (path: string) => {
@@ -80,6 +82,12 @@ class FakeSandbox {
         return { pid: 4242, stdout: 'dev server starting...\n', stderr: '', exitCode: 0 };
       }
       if (command.includes('kill -0')) return { pid: 1, stdout: 'READY 200\n', stderr: '', exitCode: 0 };
+      // Klaim Vercel CLI sudah tersedia (tanpa ini tool `deploy` berhenti lebih awal).
+      if (command.includes('agentcloud-vercel-ready') || command.includes('vercel@latest --version')) {
+        return { pid: 1, stdout: '__AC_VERCEL_READY__ penanda\n', stderr: '', exitCode: 0 };
+      }
+      // Deploy yang tidak pernah selesai: log selalu kosong (tidak ada penanda keluar).
+      if (command.includes('stat -c %Y')) return { pid: 1, stdout: '0\n', stderr: '', exitCode: 0 };
       if (command.includes('CODE')) {
         return { pid: 1, stdout: 'CODE 200\nSCAN ok\n0.0.0.0:3000\n', stderr: '', exitCode: 0 };
       }
@@ -138,13 +146,23 @@ function toolTurn(calls: Array<{ id: string; name: string; args: unknown }>): Tu
 }
 
 /** Jalankan agent dengan urutan giliran model yang sudah ditentukan. */
-async function runTurns(turns: Turn[], userText: string, options: { shot?: boolean } = {}) {
+async function runTurns(turns: Turn[], userText: string, options: { shot?: boolean; deploy?: boolean } = {}) {
   const sandbox = new FakeSandbox();
   if (options.shot) {
     // Sandbox nyata menyimpan screenshot sebagai base64 di file tetap.
     sandbox.fs.set('/home/user/.agentcloud-shot.jpg', Buffer.from('ffd8ffe000104a4649460001', 'hex').toString('base64'));
   }
-  const captured: Array<{ messages: Array<{ role: string; content: unknown }> }> = [];
+  /**
+   * Deploy yang tidak pernah selesai: dipakai menguji bahwa agent BERHENTI
+   * (tidak mengulang "Deploy masih berjalan" sampai batas langkah). Jeda polling
+   * diperpendek lewat env supaya uji tidak menunggu menit-menitan.
+   */
+  const savedTiming = { wait: process.env.DEPLOY_TOOL_WAIT_MS, poll: process.env.DEPLOY_TOOL_POLL_MS };
+  if (options.deploy) {
+    process.env.DEPLOY_TOOL_WAIT_MS = '6000';
+    process.env.DEPLOY_TOOL_POLL_MS = '150';
+  }
+  const captured: Array<{ messages: Array<{ role: string; content: unknown }>; tools: number }> = [];
   let call = 0;
 
   const originalFetch = globalThis.fetch;
@@ -158,7 +176,11 @@ async function runTurns(turns: Turn[], userText: string, options: { shot?: boole
     if (!url.includes('chat/completions')) {
       return new Response('<html><body><h1>app</h1></body></html>', { status: 200, headers: { 'content-type': 'text/html' } });
     }
-    captured.push(JSON.parse(String(init?.body ?? '{}')) as { messages: Array<{ role: string; content: unknown }> });
+    const body = JSON.parse(String(init?.body ?? '{}')) as {
+      messages: Array<{ role: string; content: unknown }>;
+      tools?: unknown[];
+    };
+    captured.push({ messages: body.messages, tools: body.tools?.length ?? 0 });
     const turn = turns[Math.min(call, turns.length - 1)];
     call += 1;
     return sse(turn.events);
@@ -171,7 +193,11 @@ async function runTurns(turns: Turn[], userText: string, options: { shot?: boole
       model: 'deepseek/deepseek-chat-v3.1',
       history: [],
       userText,
-      toolCtx: { sandbox: sandbox.asSandbox(), sandboxId: 'fake-sandbox-behavior' },
+      toolCtx: {
+        sandbox: sandbox.asSandbox(),
+        sandboxId: 'fake-sandbox-behavior',
+        ...(options.deploy ? { deploy: { token: 'vercel_tok_test', scope: '', projectName: 'sistem-kasir' } } : {}),
+      },
     })) {
       events.push(event);
     }
@@ -180,6 +206,10 @@ async function runTurns(turns: Turn[], userText: string, options: { shot?: boole
     if (originalUrl === undefined) delete process.env.OPENROUTER_BASE_URL;
     else process.env.OPENROUTER_BASE_URL = originalUrl;
     delete process.env.VISION_MODELS;
+    if (savedTiming.wait === undefined) delete process.env.DEPLOY_TOOL_WAIT_MS;
+    else process.env.DEPLOY_TOOL_WAIT_MS = savedTiming.wait;
+    if (savedTiming.poll === undefined) delete process.env.DEPLOY_TOOL_POLL_MS;
+    else process.env.DEPLOY_TOOL_POLL_MS = savedTiming.poll;
   }
 
   const done = events.find((e) => e.type === 'done') as { type: 'done'; blocks: Block[]; content: string } | undefined;
@@ -308,6 +338,40 @@ console.log('\n[4] tidak ada nudge kalau tampilan sudah diperiksa');
   check('hasil browser_check terkirim ke UI', events.some((e) => e.type === 'tool_result' && e.name === 'browser_check'));
   check('screenshot diteruskan sebagai event image', events.some((e) => e.type === 'image'));
   check('model text-only diberi tahu ia tidak melihat gambar', JSON.stringify(captured[1]?.messages ?? []).includes('TIDAK bisa dikirim ke model'));
+}
+
+console.log('\n[5] deploy belum selesai: berhenti, tidak mengulang polling tiap langkah');
+{
+  // Insiden nyata: hasil tool menyuruh "panggil tool deploy sekali lagi", jadi
+  // agent mengulanginya di SETIAP langkah (12 langkah) dan chat user penuh
+  // puluhan baris "Deploy masih berjalan. Saya akan cek sekali lagi".
+  const deployCall = (id: string) => toolTurn([{ id, name: 'deploy', args: { cwd: 'sistem-kasir' } }]);
+  const SUMMARY = 'Deploy-nya belum selesai (baru 1 menit) — tekan tombol Deploy ke Vercel di panel Preview sekali lagi untuk mengambil linknya.';
+  const { events, captured, blocks, requests } = await runTurns(
+    [deployCall('d1'), textTurn(SUMMARY), deployCall('d3'), deployCall('d4')],
+    'deploy ke vercel',
+    { deploy: true },
+  );
+
+  check('hanya SATU langkah model yang memanggil tool + satu ringkasan', requests === 2, String(requests));
+  check('tool deploy dieksekusi sekali saja', events.filter((e) => e.type === 'tool_start').length === 1, String(events.filter((e) => e.type === 'tool_start').length));
+  const statuses = events.filter((e) => e.type === 'status').map((e) => (e as { message: string }).message);
+  check('tidak ada status pengulangan panjang', statuses.length <= 1, JSON.stringify(statuses));
+  const outputs = events.filter((e) => e.type === 'tool_result').map((e) => String((e as { output: string }).output));
+  check('keluaran tool menyuruh berhenti, bukan mengulang', outputs.every((o) => /JANGAN panggil tool `deploy` lagi/.test(o)), outputs.join(' ').slice(0, 200));
+
+  // Permintaan terakhir ke model TANPA daftar tool: model tidak bisa memanggil
+  // tool lagi, jadi ia wajib menjelaskan ke user.
+  check('permintaan terakhir tanpa tools', captured[1]?.tools === 0, String(captured[1]?.tools));
+  check('permintaan ringkasan memuat larangan memanggil tool', JSON.stringify(captured[1]?.messages ?? []).includes('JANGAN memanggil tool apa pun lagi'));
+  check('tidak ada langkah model berikutnya setelah ringkasan', requests === 2, String(requests));
+  check('blok tool tetap terekam (terlihat user)', blocks.some((b) => b.type === 'tool' && (b as { name?: string }).name === 'deploy'));
+  check(
+    'ringkasan model muncul di blok akhir',
+    blocks.some((b) => b.type === 'text' && /Deploy-nya belum selesai/.test((b as { text: string }).text)),
+    JSON.stringify(blocks.map((b) => b.type)),
+  );
+  check('teks ringkasan ikut terkirim ke UI', events.some((e) => e.type === 'text' && /Deploy-nya belum selesai/.test((e as { value: string }).value)));
 }
 
 console.log(`\nhasil: ${pass} ok, ${fail} gagal`);

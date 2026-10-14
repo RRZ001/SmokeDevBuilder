@@ -83,6 +83,12 @@ export default function Workspace() {
   const [deployNote, setDeployNote] = useState<string | null>(null);
   const [disablingProtection, setDisablingProtection] = useState(false);
   /**
+   * Masalah link deploy selain proteksi — paling sering: deployment dibuat tapi
+   * tidak menyajikan halaman apa pun (404 di SEMUA alamat), biasanya karena
+   * folder yang dikirim ke Vercel bukan folder aplikasi.
+   */
+  const [deployWarning, setDeployWarning] = useState<string | null>(null);
+  /**
    * Status Deployment Protection link deploy aktif: link hidup tapi pengunjung
    * lain hanya melihat login/404 Vercel. Diperiksa saat proyek dibuka (panel
    * Preview) dan saat deploy selesai, supaya user tidak mengira linknya siap
@@ -872,6 +878,7 @@ export default function Workspace() {
             // Deploy baru = status proteksi diperiksa ulang; event
             // `deploy_protected` menyusul kalau ternyata masih terkunci.
             setProtection({ protected: false, note: null, settingsUrl: null });
+            setDeployWarning(null);
             setProjects((prev) => prev.map((p) => (p.id === activeId ? { ...p, deploy_url: url, deploy_at: at } : p)));
             pushLine('info', `Selesai! Link permanen: ${url}`);
           } else if (event.type === 'deploy_protected') {
@@ -886,6 +893,10 @@ export default function Workspace() {
             });
             setProjects((prev) => prev.map((p) => (p.id === activeId ? { ...p, deploy_url: String(event.url) } : p)));
             if (note) pushLine('error', note);
+          } else if (event.type === 'deploy_warning') {
+            const message = String(event.message ?? 'Link deploy belum menyajikan aplikasi.');
+            setDeployWarning(message);
+            pushLine('error', message);
           } else if (event.type === 'deploy_pending') {
             pending = true;
             const message = String(event.message ?? 'Deploy masih berjalan di Vercel.');
@@ -1130,6 +1141,7 @@ export default function Workspace() {
             deployProtectionNote={protection.note}
             deploySettingsUrl={protection.settingsUrl}
             disablingProtection={disablingProtection}
+            deployWarning={deployWarning}
             onDisableProtection={() => void disableDeployProtection()}
             activeTab={tab}
             onTabChange={setTab}
