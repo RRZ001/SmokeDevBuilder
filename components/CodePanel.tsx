@@ -25,6 +25,10 @@ export type PreviewState = {
   proxyError?: boolean;
   /** true = server sedang disiapkan/ditunggu (bukan gagal). */
   pending?: boolean;
+  /** Identitas halaman yang benar-benar tersaji (judul/h1/panjang teks). */
+  page?: { title: string | null; h1: string | null; textLength: number; stylesheets: number } | null;
+  /** Folder yang disajikan dev server (perubahan di luar folder ini tak terlihat). */
+  servedCwd?: string | null;
   /**
    * Halaman error yang disajikan dev server (mis. "Module not found:
    * class-variance-authority") — preview belum benar-benar berisi aplikasi user.
@@ -233,6 +237,8 @@ export default function CodePanel(props: Props) {
           proxyError={Boolean(props.preview.proxyError)}
           pending={Boolean(props.preview.pending)}
           issue={props.preview.issue ?? null}
+          page={props.preview.page ?? null}
+          servedCwd={props.preview.servedCwd ?? null}
           onAskFix={props.onAskFixPreview}
           deployUrl={props.deployUrl}
           deployAt={props.deployAt}

@@ -255,6 +255,8 @@ export default function Workspace() {
           proxyError?: boolean;
           pending?: boolean;
           issue?: PreviewState['issue'];
+          page?: PreviewState['page'];
+          servedCwd?: string | null;
           reason?: string | null;
         }>(`/api/projects/${id}/sandbox/preview`);
         setPreview((p) => ({
@@ -270,6 +272,8 @@ export default function Workspace() {
           proxyError: Boolean(data.proxyError),
           pending: Boolean(data.pending),
           issue: data.issue ?? null,
+          page: data.page ?? null,
+          servedCwd: data.servedCwd ?? null,
         }));
       } catch (err) {
         setPreview((p) => ({
@@ -363,7 +367,17 @@ export default function Workspace() {
     setLive(null);
     const project = projects.find((p) => p.id === activeId);
     setSandboxId(project?.sandbox_id ?? null);
-    setPreview((p) => ({ ...p, port: project?.preview_port ?? p.port, online: false, url: null, status: '000', pending: false, issue: null }));
+    setPreview((p) => ({
+      ...p,
+      port: project?.preview_port ?? p.port,
+      online: false,
+      url: null,
+      status: '000',
+      pending: false,
+      issue: null,
+      page: null,
+      servedCwd: null,
+    }));
     void loadMessages(activeId);
     void refreshFiles(activeId);
     // eslint-disable-next-line react-hooks/exhaustive-deps

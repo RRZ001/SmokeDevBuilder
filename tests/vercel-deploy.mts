@@ -870,5 +870,34 @@ console.log('\n[13] deploy belum selesai: agent BERHENTI (tidak mengulang pollin
   delete process.env.DEPLOY_TOOL_POLL_MS;
 }
 
+console.log('\n[14] write_file memberi tahu folder yang disajikan dev server');
+{
+  // Menutup keluhan "desain sudah saya perbarui tapi preview tidak berubah":
+  // agent langsung diberi tahu kalau file-nya jatuh di luar folder yang disajikan.
+  const fake = new FakeSandbox({ logAfterPolls: 1, log: '' });
+  fake.fs.set(
+    '/home/user/.agentcloud-servers.json',
+    JSON.stringify([{ port: 3000, command: 'npm run dev', cwd: '/home/user/project/sistem-kasir', startedAt: Date.now() }]),
+  );
+  const ctx = { sandbox: fake.asSandbox(), sandboxId: 'write-file-test' };
+
+  const outside = await executeTool(ctx, 'write_file', { path: 'app/page.tsx', content: 'x' });
+  check('file di luar folder yang disajikan: ada peringatan', /TIDAK akan terlihat di preview/.test(outside.output), outside.output.slice(0, 200));
+  check('peringatan menyebut folder yang disajikan', /sistem-kasir/.test(outside.output));
+
+  const inside = await executeTool(ctx, 'write_file', { path: 'sistem-kasir/app/page.tsx', content: 'y' });
+  check('file di dalam folder yang disajikan: tanpa peringatan', !/TIDAK akan terlihat di preview/.test(inside.output), inside.output.slice(0, 200));
+
+  // Server yang sudah mati (registry kosong) tidak boleh menuduh apa pun.
+  // Sandbox-id dibedakan karena cache folder-disajikan bersifat per-sandbox.
+  const noServer = new FakeSandbox({ logAfterPolls: 1, log: '' });
+  Object.defineProperty(noServer, 'sandboxId', { value: 'write-file-test-clean' });
+  const clean = await executeTool({ sandbox: noServer.asSandbox(), sandboxId: 'write-file-test-2' }, 'write_file', {
+    path: 'app/page.tsx',
+    content: 'z',
+  });
+  check('tanpa catatan server: tanpa peringatan', !/TIDAK akan terlihat di preview/.test(clean.output), clean.output.slice(0, 200));
+}
+
 console.log(`\nhasil: ${pass} ok, ${fail} gagal`);
 if (fail) process.exit(1);

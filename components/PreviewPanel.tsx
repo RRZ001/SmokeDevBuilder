@@ -20,6 +20,13 @@ type Props = {
   pending?: boolean;
   /** Halaman error yang disajikan dev server (preview belum berisi aplikasi user). */
   issue?: PreviewIssueInfo | null;
+  /**
+   * Identitas halaman yang BENAR-BENAR tersaji (judul/h1/panjang teks) + folder
+   * yang disajikan dev server. Ditampilkan supaya "preview tidak berubah" bisa
+   * dibedakan dari "perubahan saya tidak tersaji" tanpa menebak.
+   */
+  page?: { title: string | null; h1: string | null; textLength: number; stylesheets: number } | null;
+  servedCwd?: string | null;
   onRefresh: () => void;
   onRestart: () => void;
   onSetPort: (port: number) => void;
@@ -59,6 +66,8 @@ export default function PreviewPanel({
   proxyError,
   pending,
   issue,
+  page,
+  servedCwd,
   onRefresh,
   onRestart,
   onSetPort,
@@ -183,6 +192,23 @@ export default function PreviewPanel({
           </button>
         )}
       </div>
+
+      {/* Halaman apa yang SEDANG tersaji + folder yang disajikan dev server. */}
+      {(page?.h1 || page?.title || servedCwd) && (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-white/[0.06] bg-white/[0.02] px-3 py-1 text-[11px] text-ink-500">
+          {(page?.h1 || page?.title) && (
+            <span className="min-w-0 truncate">
+              menyajikan: <span className="text-ink-200">{page.h1 ?? page.title}</span>
+            </span>
+          )}
+          {page && <span className="shrink-0">{page.textLength} karakter · {page.stylesheets} CSS</span>}
+          {servedCwd && (
+            <span className="min-w-0 truncate font-mono" title="Folder yang disajikan dev server (perubahan di luar folder ini tidak akan terlihat)">
+              folder: {servedCwd}
+            </span>
+          )}
+        </div>
+      )}
 
       {(deployUrl || deployNote) && (
         <div className="flex flex-wrap items-center gap-2 border-b border-white/[0.06] bg-white/[0.02] px-3 py-1.5 text-[11.5px] text-ink-300">

@@ -15,13 +15,19 @@ import {
   decideServerReadiness,
   detectFrameworkFromPackageJson,
   evaluatePublicProbe,
+  extractPageSummary,
   hostOverrideFor,
+  isInsideDir,
+  normalizeDir,
   parseListenScope,
   parseReadiness,
   parseServerRegistry,
   serializeServerRegistry,
+  servedFolderWarning,
+  summarizePage,
   type FrameworkHint,
   type ListenScope,
+  type PageSummary,
   type PublicProbe,
   type Readiness,
   type ServerRecord,
@@ -237,6 +243,32 @@ export async function writeProjectFile(sandbox: Sandbox, path: string, content: 
  */
 export const SERVER_REGISTRY_PATH = '/home/user/.agentcloud-servers.json';
 
+/**
+ * Folder yang sedang disajikan dev server, di-cache 5 detik per sandbox.
+ *
+ * Dipakai pada SETIAP penulisan file untuk memberi tahu agent kalau file-nya
+ * jatuh di luar folder yang disajikan (penyebab nyata "desain sudah saya ubah
+ * tapi preview tidak berubah"). Cache pendek supaya satu rangkaian penulisan file
+ * tidak membaca registry berkali-kali.
+ */
+const servedDirsCache = new Map<string, { at: number; dirs: string[] }>();
+
+export async function servedDirs(sandbox: Sandbox): Promise<string[]> {
+  const key = sandbox.sandboxId || 'sandbox';
+  const hit = servedDirsCache.get(key);
+  if (hit && Date.now() - hit.at < 5_000) return hit.dirs;
+  const records = await readServerRegistry(sandbox).catch(() => [] as ServerRecord[]);
+  const dirs = [...new Set(records.map((r) => normalizeDir(r.cwd)).filter(Boolean))];
+  servedDirsCache.set(key, { at: Date.now(), dirs });
+  return dirs;
+}
+
+/** true = ada dev server yang tercatat pernah dijalankan di sandbox ini. */
+export async function hasRunningServer(sandbox: Sandbox): Promise<boolean> {
+  const records = await readServerRegistry(sandbox).catch(() => [] as ServerRecord[]);
+  return records.length > 0;
+}
+
 export async function readServerRegistry(sandbox: Sandbox): Promise<ServerRecord[]> {
   try {
     const raw = await sandbox.files.read(SERVER_REGISTRY_PATH);
@@ -399,6 +431,8 @@ export type StartServerOutcome = {
   publicStatus: string;
   /** Halaman error kompilasi (mis. modul belum terpasang) yang menghalangi preview. */
   issue?: PreviewIssue | null;
+  /** Identitas halaman yang benar-benar disajikan (judul/h1/panjang teks). */
+  page?: PageSummary | null;
 };
 
 type LaunchAttempt = {
@@ -546,6 +580,7 @@ export async function startServer(
     listenScope: attempt.listenScope,
     publicStatus: attempt.publicProbe.status,
     issue: decision.issue ?? null,
+    page: attempt.publicProbe.page ?? null,
   };
 }
 
@@ -615,6 +650,8 @@ export async function stopServer(sandbox: Sandbox, port: number): Promise<boolea
     { cwd: '/', timeoutMs: 20_000 },
   );
   await forgetServer(sandbox, port);
+  // Server dihentikan: catatan folder yang disajikan tidak lagi berlaku.
+  servedDirsCache.delete(sandbox.sandboxId || 'sandbox');
   return killed;
 }
 
@@ -1485,7 +1522,20 @@ export async function executeTool(ctx: ToolContext, name: string, rawArgs: Recor
         const content = typeof args.content === 'string' ? args.content : String(args.content ?? '');
         if (!path) return { ok: false, output: 'Parameter `path` wajib diisi.' };
         const res = await writeProjectFile(ctx.sandbox, path, content);
-        return { ok: true, output: `File ${res.path} tersimpan (${humanSize(res.bytes)}).` };
+        /**
+         * Ingatkan kalau file ini jatuh di LUAR folder yang disajikan dev server.
+         *
+         * Keluhan nyata: user minta "perbarui desain", agent melapor selesai,
+         * tetapi preview tetap versi lama — karena file-nya ditulis ke folder lain
+         * daripada yang disajikan server (aplikasi ada di sub-folder). Satu baris
+         * catatan ini membuat agent tahu tanpa perlu menebak.
+         */
+        const warning = servedFolderWarning({
+          wrotePath: resolvePath(path),
+          servedDirs: await servedDirs(ctx.sandbox),
+          projectDir: SANDBOX_PROJECT_DIR,
+        });
+        return { ok: true, output: `File ${res.path} tersimpan (${humanSize(res.bytes)}).${warning ? `\n${warning}` : ''}` };
       }
 
       case 'read_file': {
@@ -1528,6 +1578,10 @@ export async function executeTool(ctx: ToolContext, name: string, rawArgs: Recor
                   : 'BELUM SIAP - jangan katakan preview siap ke user'
             }`,
             res.reason ? `masalah: ${res.reason}` : '',
+            // Halaman mana yang BENAR-BENAR tersaji — supaya agent bisa menilai
+            // "apakah perubahan saya sudah terlihat?" tanpa menebak dari HTTP 200.
+            summarizePage(res.page) ? `halaman_tersaji: ${summarizePage(res.page)}` : '',
+            `folder_disajikan: ${relPath(cwd, SANDBOX_PROJECT_DIR) || '.'}`,
             res.issue?.fixCommand ? `perbaikan: jalankan \`${res.issue.fixCommand}\` lalu panggil start_server lagi` : '',
             res.warning ? `catatan: ${res.warning}` : '',
             res.logs ? `logs:\n${truncate(res.logs, 3_000)}` : 'logs: (kosong)',
@@ -1568,6 +1622,7 @@ export async function executeTool(ctx: ToolContext, name: string, rawArgs: Recor
             `preview_url: ${url}`,
             `http_lokal: ${local.code}  |  bind: ${local.scope}  |  url_publik: ${publicProbe.status}`,
             `status: ${decision.ready ? 'SIAP dipakai user' : 'BELUM SIAP'}`,
+            summarizePage(publicProbe.page) ? `halaman_tersaji: ${summarizePage(publicProbe.page)}` : '',
             decision.reason ? `masalah: ${decision.reason}` : '',
             decision.issue?.fixCommand ? `perbaikan: jalankan \`${decision.issue.fixCommand}\`` : '',
             decision.warning ? `catatan: ${decision.warning}` : '',

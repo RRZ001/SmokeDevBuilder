@@ -165,6 +165,10 @@ async function inspect(sandbox: Sandbox, port: number, allowRevive: boolean): Pr
     reason,
     pending,
     issue: publicProbe.issue ?? null,
+    // Identitas halaman yang benar-benar tersaji: dipakai panel Preview untuk
+    // menunjukkan "preview ini sedang menampilkan halaman apa", sehingga user
+    // tidak tertipu status 200 saat halamannya masih versi lama.
+    page: publicProbe.page ?? null,
   };
 }
 
@@ -187,7 +191,16 @@ export async function GET(request: Request, ctx: Ctx) {
     const handle = await getSandbox(project.sandbox_id, { create: false });
     const status = await inspect(handle.sandbox, port, true);
 
-    return ok({ ...status, servers: listServers(project.sandbox_id) });
+    /**
+     * Folder yang SEDANG disajikan dev server (dari catatan di dalam sandbox).
+     * Ditampilkan ke user supaya ketidakcocokan "file ditulis di folder A, server
+     * menyajikan folder B" langsung terlihat — bukan cuma jadi misteri "kenapa
+     * preview tidak berubah".
+     */
+    const registry = await readServerRegistry(handle.sandbox).catch(() => []);
+    const servedCwd = registry.find((r) => r.port === port)?.cwd ?? registry[0]?.cwd ?? null;
+
+    return ok({ ...status, servedCwd, servers: listServers(project.sandbox_id) });
   } catch (err) {
     return errorResponse(err);
   }

@@ -36,7 +36,119 @@ export type PublicProbe = {
    * memang hidup — tetapi preview-nya belum bisa dipakai.
    */
   issue?: PreviewIssue | null;
+  /**
+   * Identitas halaman yang benar-benar disajikan (judul/h1/panjang teks).
+   *
+   * Dipakai untuk menjawab keluhan nyata: agent bilang "desain sudah saya
+   * perbarui", user melihat halaman lama. Dengan judul/h1/panjang teks, agent &
+   * panel Preview bisa menunjukkan HALAMAN MANA yang sedang tersaji — bukan
+   * sekadar "HTTP 200".
+   */
+  page?: PageSummary | null;
 };
+
+/** Ringkasan halaman yang benar-benar disajikan server (dari HTML-nya). */
+export type PageSummary = {
+  title: string | null;
+  h1: string | null;
+  textLength: number;
+  /** Jumlah <link rel="stylesheet"> dan <script src> (indikasi halaman kosong/polos). */
+  stylesheets: number;
+  scripts: number;
+};
+
+function decodeEntities(value: string): string {
+  return value
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Baca identitas halaman dari HTML mentah.
+ *
+ * Sengaja sederhana (regex, bukan parser HTML): yang dibutuhkan hanya judul, h1,
+ * perkiraan panjang teks, dan berapa aset CSS/JS yang dirujuk supaya halaman
+ * "polos tanpa CSS" bisa dibedakan dari halaman yang benar-benar berdesain.
+ */
+export function extractPageSummary(html: string): PageSummary {
+  const text = html || '';
+  const title = text.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1];
+  const h1 = text.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i)?.[1];
+  const stylesheets = (text.match(/<link[^>]+rel=["']?stylesheet/gi) ?? []).length;
+  const scripts = (text.match(/<script[^>]+src=/gi) ?? []).length;
+  // Perkiraan teks yang dilihat user: buang tag & isi <script>/<style>.
+  const visible = text
+    .replace(/<(script|style)[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return {
+    title: title ? decodeEntities(title).slice(0, 160) || null : null,
+    h1: h1 ? decodeEntities(h1.replace(/<[^>]+>/g, ' ')).slice(0, 160) || null : null,
+    textLength: visible.length,
+    stylesheets,
+    scripts,
+  };
+}
+
+/** Satu baris identitas halaman untuk ditampilkan ke user/agent. */
+export function summarizePage(page: PageSummary | null | undefined): string | null {
+  if (!page) return null;
+  const name = page.h1 ?? page.title;
+  if (!name) return null;
+  return `${name} (${page.textLength} karakter teks, ${page.stylesheets} CSS)`;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Folder yang benar-benar disajikan dev server                                */
+/* -------------------------------------------------------------------------- */
+
+/** Normalisasi path folder (buang garis miring di ujung). */
+export function normalizeDir(dir: string): string {
+  return (dir || '').replace(/\/+$/, '');
+}
+
+/** Apakah `filePath` berada di dalam `dir`? */
+export function isInsideDir(filePath: string, dir: string): boolean {
+  const file = normalizeDir(filePath);
+  const base = normalizeDir(dir);
+  if (!file || !base) return false;
+  return file === base || file.startsWith(`${base}/`);
+}
+
+/**
+ * Peringatan untuk agent saat file yang baru ditulis TIDAK berada di folder yang
+ * disajikan dev server.
+ *
+ * Keluhan nyata: user minta "perbarui desain", agent mengaku sudah selesai, tetapi
+ * preview tetap menampilkan versi lama. Penyebab paling sering bukan modelnya —
+ * file ditulis ke folder lain daripada yang disajikan dev server (aplikasi berada
+ * di sub-folder), sehingga perubahan tidak pernah terlihat.
+ */
+export function servedFolderWarning(options: {
+  /** Path file yang baru ditulis. */
+  wrotePath: string;
+  /** Folder yang sedang disajikan dev server (dari registry, bisa kosong). */
+  servedDirs: string[];
+  /** Folder akar proyek (untuk pesan). */
+  projectDir?: string;
+}): string | null {
+  const dirs = options.servedDirs.map(normalizeDir).filter(Boolean);
+  if (!dirs.length) return null;
+  if (dirs.some((dir) => isInsideDir(options.wrotePath, dir))) return null;
+  const where = normalizeDir(options.wrotePath).replace(/\/[^/]*$/, '') || '/';
+  return (
+    `catatan: file ini ditulis ke ${where}, sedangkan dev server yang sedang berjalan menyajikan ${dirs.join(', ')} — ` +
+    'perubahan ini TIDAK akan terlihat di preview. Tulis/perbaiki file di dalam folder yang disajikan itu, ' +
+    'atau jalankan ulang server dengan `cwd` yang benar (lihat catatan server di /home/user/.agentcloud-servers.json).'
+  );
+}
 
 export type ServerRecord = {
   port: number;
@@ -99,7 +211,10 @@ export function evaluatePublicProbe(status: number, body: string, log?: string):
   const gateway = status >= 502 && status <= 504;
   const online = code !== '000' && !proxyError && !gateway;
   const issue = online ? detectPreviewIssue({ status, body, log }) : null;
-  return { status: code, online, proxyError, issue };
+  // Identitas halaman ikut dilaporkan supaya "preview tidak berubah" bisa
+  // dibuktikan dari isi halaman, bukan dari asumsi.
+  const page = online && body ? extractPageSummary(body) : null;
+  return { status: code, online, proxyError, issue, page };
 }
 
 export type Readiness = { state: 'ready' | 'dead' | 'timeout' | 'unknown'; code: string | null };
@@ -353,6 +468,8 @@ export type PreviewStatus = {
   pending: boolean;
   /** Halaman error (mis. modul belum terpasang) yang membuat preview belum bisa dipakai. */
   issue?: PreviewIssue | null;
+  /** Identitas halaman yang benar-benar tersaji (judul/h1/panjang teks). */
+  page?: PageSummary | null;
 };
 
 /**

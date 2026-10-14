@@ -21,6 +21,10 @@ import {
   decideServerReadiness,
   detectFrameworkFromPackageJson,
   evaluatePublicProbe,
+  extractPageSummary,
+  isInsideDir,
+  servedFolderWarning,
+  summarizePage,
   hostOverrideFor,
   parseListenScope,
   parseReadiness,
@@ -390,6 +394,44 @@ console.log('\n[5] server hidup tapi belum listen (dev server lambat/kompilasi)'
   check('server siap', res.ready === true, String(res.reason));
   const record = parseServerRegistry(fake.fs.get(SERVER_REGISTRY_PATH) ?? '[]')[0];
   check('catatan menandai server sudah pernah siap (readyAt)', (record?.readyAt ?? 0) > 0, JSON.stringify(record));
+}
+
+console.log('\n[6] identitas halaman + folder yang disajikan (preview tidak berubah)');
+{
+  // Keluhan nyata: agent bilang "desain sudah diperbarui", user melihat halaman
+  // lama. Panel & agent kini bisa menunjukkan HALAMAN mana yang tersaji.
+  const html = `<!doctype html><html lang="id"><head><title>POS Multi-Store</title>
+    <link rel="stylesheet" href="/_next/static/css/app.css">
+    <style>h1{color:red}</style>
+    <script src="/_next/static/chunks/main.js"></script></head>
+    <body><h1>POS Multi-Store</h1><p>Kelola semua cabang toko.</p></body></html>`;
+  const page = extractPageSummary(html);
+  check('judul halaman dibaca', page.title === 'POS Multi-Store', String(page.title));
+  check('h1 dibaca', page.h1 === 'POS Multi-Store', String(page.h1));
+  check('jumlah CSS dihitung (halaman polos bisa dibedakan)', page.stylesheets === 1, String(page.stylesheets));
+  check('jumlah script dihitung', page.scripts === 1, String(page.scripts));
+  check('isi <script>/<style> tidak ikut dihitung sebagai teks', !/color:red/.test(String(page.textLength)) && page.textLength < 200, String(page.textLength));
+  check('panjang teks mencerminkan isi halaman', page.textLength > 20, String(page.textLength));
+  check('ringkasan satu baris untuk user/agent', /POS Multi-Store \(\d+ karakter teks, 1 CSS\)/.test(summarizePage(page) ?? ''), String(summarizePage(page)));
+  check('entitas HTML diurai', extractPageSummary('<title>Kasir &amp; Toko</title>').title === 'Kasir & Toko', String(extractPageSummary('<title>Kasir &amp; Toko</title>').title));
+  check('halaman tanpa judul/h1 tetap aman', summarizePage(extractPageSummary('<div>x</div>')) === null);
+  check('probe publik menyertakan identitas halaman', evaluatePublicProbe(200, html).page?.h1 === 'POS Multi-Store');
+  check('probe error tidak menyertakan halaman', evaluatePublicProbe(0, '').page === null);
+
+  const served = ['/home/user/project/sistem-kasir'];
+  check('file di dalam folder yang disajikan: tidak ada peringatan', servedFolderWarning({ wrotePath: '/home/user/project/sistem-kasir/app/page.tsx', servedDirs: served }) === null);
+  const warn = servedFolderWarning({ wrotePath: '/home/user/project/app/page.tsx', servedDirs: served });
+  check('file di LUAR folder yang disajikan: diperingatkan', Boolean(warn), String(warn));
+  check(
+    'peringatan menyebut folder tempat menulis + folder yang disajikan',
+    /ditulis ke \/home\/user\/project\/app, sedangkan dev server/.test(warn ?? '') && /sistem-kasir/.test(warn ?? ''),
+    String(warn),
+  );
+  check('peringatan menjelaskan preview tidak akan berubah', /TIDAK akan terlihat di preview/.test(warn ?? ''), String(warn));
+  check('tanpa catatan server: tidak ada peringatan (jangan menuduh)', servedFolderWarning({ wrotePath: '/x/y.tsx', servedDirs: [] }) === null);
+  check('folder bersarang dianggap di dalam', isInsideDir('/home/user/project/app/page.tsx', '/home/user/project'));
+  check('folder tetangga yang mirip namanya TIDAK dianggap di dalam', !isInsideDir('/home/user/project2/page.tsx', '/home/user/project'));
+  check('path sama persis dianggap di dalam', isInsideDir('/home/user/project', '/home/user/project/'));
 }
 
 console.log(`\nhasil: ${pass} ok, ${fail} gagal`);

@@ -1,11 +1,19 @@
 import { MAX_AGENT_STEPS, MAX_AUTO_DEBUG_ROUNDS, MAX_OUTPUT_TOKENS, TOOL_OUTPUT_CHARS } from '@/lib/config';
 import type { Block, ChoicesBlock, PlanBlock, PlanItem, TextBlock, ToolBlock, UsageBlock } from '@/lib/db/types';
 import { truncate } from '@/lib/util';
-import { TOOL_DEFINITIONS, executeTool, type ToolContext, type ToolResult } from '@/lib/sandbox/tools';
+import { TOOL_DEFINITIONS, executeTool, hasRunningServer, type ToolContext, type ToolResult } from '@/lib/sandbox/tools';
 import { CHOICE_MARKERS, parseChoices } from './choices';
 import { PLAN_MARKERS, parsePlans } from './plan';
 import { createMarkerStreamFilter, type MarkerPair } from './marker-block';
-import { autoDebugNudge, buildSystemPrompt, stepBudgetNotice, stopTurnSummaryNotice, visualCheckNudge, type AgentMode } from './prompt';
+import {
+  autoDebugNudge,
+  buildSystemPrompt,
+  previewChangedNudge,
+  stepBudgetNotice,
+  stopTurnSummaryNotice,
+  visualCheckNudge,
+  type AgentMode,
+} from './prompt';
 import { OpenRouterError, streamChat, type ChatMsg, type UsageInfo } from './openrouter';
 import { supportsVision } from './vision';
 
@@ -212,6 +220,14 @@ export async function* runAgent(options: RunAgentOptions): AsyncGenerator<AgentE
        * sampai batas langkah dan menulis kalimat berulang ke chat user.
        */
       let stopTurnRequested = false;
+      /**
+       * true = ada file aplikasi yang ditulis pada langkah ini. Dipakai untuk
+       * memastikan agent MEMERIKSA preview-nya sebelum mengklaim desain selesai
+       * (keluhan nyata: "agent bilang desain sudah diperbarui, preview masih lama").
+       */
+      let wroteFiles = false;
+      /** true = file yang ditulis benar-benar bagian dari aplikasi (bukan .md/.log). */
+      let wroteAppFile = false;
       /** Screenshot dari browser_check pada langkah ini (untuk model & UI). */
       const shots: Array<{ dataUrl: string; caption: string }> = [];
 
@@ -259,6 +275,14 @@ export async function* runAgent(options: RunAgentOptions): AsyncGenerator<AgentE
         // server preview benar-benar siap, atau model sudah mencoba memeriksanya.
         if (call.name === 'start_server' && result.ok) previewStarted = true;
         if (call.name === 'browser_check') visuallyChecked = true;
+        if (call.name === 'write_file') {
+          wroteFiles = true;
+          // Catatan/dokumen tidak memengaruhi tampilan: jangan memicu pemeriksaan.
+          const target = String((args as { path?: unknown }).path ?? '');
+          if (target && !/\.(md|markdown|txt|log|lock)$/i.test(target) && !/package-lock\.json$/.test(target)) {
+            wroteAppFile = true;
+          }
+        }
         if (result.stopTurn) stopTurnRequested = true;
 
         yield {
@@ -407,6 +431,25 @@ export async function* runAgent(options: RunAgentOptions): AsyncGenerator<AgentE
         yield { type: 'status', message: 'Meminta agent memeriksa tampilannya dengan browser sungguhan…' };
         messages.push({ role: 'user', content: visualCheckNudge() });
         continue;
+      }
+
+      /**
+       * Agent mengubah file aplikasi sementara dev server SUDAH berjalan (dari
+       * giliran sebelumnya), tetapi belum memeriksa preview-nya sama sekali di
+       * giliran ini → dorong sekali untuk memeriksa.
+       *
+       * Inilah yang menutup keluhan nyata "minta perbarui desain, agent bilang
+       * sudah, tapi halamannya masih yang lama": perubahan file saja tidak
+       * membuktikan apa pun tentang halaman yang benar-benar tersaji.
+       */
+      if (mode === 'agent' && wroteAppFile && !visuallyChecked && !visualNudged && !previewStarted) {
+        const running = await hasRunningServer(toolCtx.sandbox).catch(() => false);
+        if (running) {
+          visualNudged = true;
+          yield { type: 'status', message: 'Meminta agent memeriksa apakah preview sudah memuat perubahannya…' };
+          messages.push({ role: 'user', content: previewChangedNudge() });
+          continue;
+        }
       }
 
       // Model sudah memanggil tool: lanjut supaya ia melihat hasilnya dan menutup giliran.

@@ -146,8 +146,22 @@ function toolTurn(calls: Array<{ id: string; name: string; args: unknown }>): Tu
 }
 
 /** Jalankan agent dengan urutan giliran model yang sudah ditentukan. */
-async function runTurns(turns: Turn[], userText: string, options: { shot?: boolean; deploy?: boolean } = {}) {
+async function runTurns(
+  turns: Turn[],
+  userText: string,
+  options: { shot?: boolean; deploy?: boolean; server?: boolean } = {},
+) {
   const sandbox = new FakeSandbox();
+  if (options.server) {
+    // Catatan server di dalam sandbox: dipakai hasRunningServer() untuk memutuskan
+    // apakah perubahan file perlu dibuktikan lewat preview.
+    sandbox.fs.set(
+      '/home/user/.agentcloud-servers.json',
+      JSON.stringify([
+        { port: 3000, command: 'npm run dev', cwd: '/home/user/project', startedAt: Date.now(), readyAt: Date.now() },
+      ]),
+    );
+  }
   if (options.shot) {
     // Sandbox nyata menyimpan screenshot sebagai base64 di file tetap.
     sandbox.fs.set('/home/user/.agentcloud-shot.jpg', Buffer.from('ffd8ffe000104a4649460001', 'hex').toString('base64'));
@@ -372,6 +386,57 @@ console.log('\n[5] deploy belum selesai: berhenti, tidak mengulang polling tiap 
     JSON.stringify(blocks.map((b) => b.type)),
   );
   check('teks ringkasan ikut terkirim ke UI', events.some((e) => e.type === 'text' && /Deploy-nya belum selesai/.test((e as { value: string }).value)));
+}
+
+console.log('\n[6] agent mengubah file padahal server sudah jalan => WAJIB periksa preview');
+{
+  // Keluhan nyata: "minta perbarui desain sistem kasir, agent bilang sudah, tapi
+  // preview-nya masih halaman lama". Perubahan file saja tidak membuktikan apa pun
+  // tentang halaman yang benar-benar tersaji.
+  const writeTurn = toolTurn([{ id: 'w1', name: 'write_file', args: { path: 'app/page.tsx', content: 'export default function P(){return null}' } }]);
+  const { events, captured, requests } = await runTurns(
+    [writeTurn, textTurn('Desain sudah saya perbarui: lebih modern dan jelas!'), writeTurn, textTurn('Tetap.')],
+    'perbarui desain sistem kasir',
+    { server: true },
+  );
+
+  check('pengingat memeriksa preview dikirim', events.some((e) => e.type === 'status' && /memuat perubahannya/i.test(e.message)));
+  const nudged = JSON.stringify(captured[1]?.messages ?? []);
+  check('pengingat meminta browser_check', nudged.includes('browser_check'));
+  check('pengingat menyebut folder yang disajikan', nudged.includes('folder_disajikan'));
+  check('pengingat melarang mengklaim tanpa memeriksa', /JANGAN bilang selesai/.test(nudged));
+  check('hanya satu kali pengingat', events.filter((e) => e.type === 'status' && /memuat perubahannya/i.test(e.message)).length === 1);
+
+  // Kalau agent SUDAH menjalankan browser_check, tidak ada pengingat lagi.
+  const checked = await runTurns(
+    [
+      toolTurn([
+        { id: 'w2', name: 'write_file', args: { path: 'app/page.tsx', content: 'x' } },
+        { id: 'b2', name: 'browser_check', args: { port: 3000, viewport: 'mobile' } },
+      ]),
+      textTurn('Sudah saya periksa — halaman memuat desain baru.'),
+    ],
+    'perbarui desain',
+    { server: true, shot: true },
+  );
+  check('tanpa pengingat kalau tampilan sudah diperiksa', !checked.events.some((e) => e.type === 'status' && /memuat perubahannya/i.test(e.message)));
+  check('permintaan model tidak bertambah karena pengingat', checked.requests === 2, String(checked.requests));
+
+  // Tanpa dev server yang berjalan, tidak ada yang perlu diperiksa.
+  const noServer = await runTurns(
+    [writeTurn, textTurn('File ditulis.')],
+    'tulis file konfigurasi',
+  );
+  check('tanpa server berjalan: tidak ada pengingat', !noServer.events.some((e) => e.type === 'status' && /memuat perubahannya/i.test(e.message)));
+
+  // Menulis dokumen (README) bukan perubahan tampilan.
+  const docs = await runTurns(
+    [toolTurn([{ id: 'w3', name: 'write_file', args: { path: 'README.md', content: '# App' } }]), textTurn('README diperbarui.')],
+    'perbarui dokumentasi',
+    { server: true },
+  );
+  check('menulis README tidak memicu pemeriksaan tampilan', !docs.events.some((e) => e.type === 'status' && /memuat perubahannya/i.test(e.message)));
+  check('requests tetap 2 (tanpa langkah pengingat)', requests >= 2, String(requests));
 }
 
 console.log(`\nhasil: ${pass} ok, ${fail} gagal`);

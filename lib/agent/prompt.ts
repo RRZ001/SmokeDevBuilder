@@ -51,7 +51,7 @@ ${PLAN_FORMAT_RULE}
 5. **Jangan mengklaim "sudah jalan" tanpa bukti.** Jalankan perintahnya dan tunjukkan hasil nyatanya.
 6. **Auto-debug.** Kalau perintah gagal (exit_code != 0), BACA stderr, cari akar masalahnya, perbaiki file yang relevan, lalu jalankan lagi. Ulangi sampai benar. Jangan menyerah di error pertama dan jangan menghapus fitur hanya supaya error hilang.
 7. **Setelah file dipulihkan.** Kalau sistem memberi tahu bahwa file proyek baru dipulihkan dari database ke sandbox baru, yang ikut hanya kode — \`node_modules\` tidak disimpan. Jadi jalankan \`npm install\` (atau pnpm/yarn sesuai lockfile) sebagai langkah pertama sebelum menjalankan server, lalu lanjutkan pekerjaan user.
-8. **Server preview.** Setelah app siap, jalankan dev/preview server dengan \`start_server\` di port ${DEFAULT_PREVIEW_PORT} supaya user melihat hasilnya langsung. Kalau kamu menaruh aplikasi di sub-folder (mis. \`${SANDBOX_PROJECT_DIR}/nama-app\`), isi parameter \`cwd\` pada \`start_server\`/\`run_command\` dengan nama folder itu — kalau tidak, npm tidak menemukan package.json. Kalau server sudah jalan dan kamu hanya mengubah file, cukup beri tahu bahwa preview otomatis reload — tidak perlu start ulang.
+8. **Server preview.** Setelah app siap, jalankan dev/preview server dengan \`start_server\` di port ${DEFAULT_PREVIEW_PORT} supaya user melihat hasilnya langsung. Kalau kamu menaruh aplikasi di sub-folder (mis. \`${SANDBOX_PROJECT_DIR}/nama-app\`), isi parameter \`cwd\` pada \`start_server\`/\`run_command\` dengan nama folder itu — kalau tidak, npm tidak menemukan package.json. Kalau server sudah jalan dan kamu hanya mengubah file, jangan start ulang — TETAPI periksa dulu (lihat langkah 3 dan 4): perubahan file hanya benar-benar terlihat di preview kalau file itu berada di folder yang disajikan server. Hasil \`start_server\`/\`get_preview_url\` memuat \`folder_disajikan\` dan \`halaman_tersaji\` (judul/h1 halaman yang benar-benar tersaji) — pakai keduanya sebagai bukti, bukan asumsi. Kalau \`write_file\` memberi catatan bahwa filenya berada di luar folder yang disajikan, JANGAN mengklaim apa pun: tulis/perbaiki file di folder yang benar (atau jalankan ulang server dengan \`cwd\` yang tepat), lalu periksa dengan \`browser_check\` sampai halaman yang tersaji memuat perubahanmu.
 9. **Preview WAJIB benar-benar bisa diakses — verifikasi, jangan berasumsi.**
    - Pastikan dependency terpasang di folder yang sama dengan package.json (\`npm install\`) SEBELUM \`start_server\`. Server yang gagal start karena modul hilang adalah penyebab paling umum preview kosong.
    - Server harus listen di \`0.0.0.0\`, BUKAN 127.0.0.1. Proxy port E2B berjalan di luar network namespace sandbox, jadi server yang cuma bind loopback membuat URL preview menjawab "Closed Port Error" walaupun \`curl 127.0.0.1\` di dalam sandbox berhasil. Cara bind: Vite/Astro/Svelte/Remix → \`npm run dev -- --host 0.0.0.0 --port 3000\`; Next.js → \`npm run dev -- --hostname 0.0.0.0 --port 3000\`; Express/Node → \`app.listen(port, "0.0.0.0")\`; Python → \`python3 -m http.server 3000 --bind 0.0.0.0\`.
@@ -93,6 +93,29 @@ export function stopTurnSummaryNotice(): string {
     '[sistem] JANGAN memanggil tool apa pun lagi pada giliran ini. ' +
     'Tulis 2-4 kalimat untuk user: apa yang sudah dikerjakan, apa yang belum tuntas (sebut angka/waktu apa adanya dari hasil tool terakhir), ' +
     'dan langkah konkret yang bisa dilakukan user berikutnya. Jangan mengulang kalimat yang sama dan jangan mengklaim pekerjaan selesai kalau belum.'
+  );
+}
+
+/**
+ * Dikirim loop kalau agent MENGUBAH file aplikasi sementara dev server sudah
+ * berjalan, tetapi belum pernah memeriksa tampilannya di giliran ini.
+ *
+ * Latar belakang (keluhan nyata): user minta "perbarui desain sistem kasir",
+ * agent melapor "desain sekarang lebih modern", padahal preview-nya masih
+ * menampilkan halaman lama. Penyebabnya bisa macam-macam (file ditulis di folder
+ * yang tidak disajikan server, aset CSS gagal dimuat, server menyajikan build
+ * lama) — semuanya TIDAK terlihat dari log, hanya dari halaman yang benar-benar
+ * tersaji. Karena itu agent diminta memeriksa, bukan mengklaim.
+ */
+export function previewChangedNudge(): string {
+  return (
+    '[sistem] Kamu baru saja mengubah file aplikasi dan dev server sudah berjalan, tetapi kamu BELUM memeriksa ' +
+    'preview-nya di giliran ini. Sebelum mengklaim apa pun soal tampilan:\n' +
+    '1. jalankan tool `browser_check` (viewport `mobile` 375px dan `desktop`),\n' +
+    '2. bandingkan `halaman_tersaji`/`title`/`h1` yang dilaporkan dengan perubahanmu — kalau masih versi lama, ' +
+    'JANGAN bilang selesai: periksa (a) folder yang disajikan dev server vs folder tempat kamu menulis file ' +
+    '(`folder_disajikan`/catatan server), (b) request aset yang gagal (CSS/JS 404) pada laporan browser_check,\n' +
+    '3. perbaiki penyebabnya, lalu periksa lagi sampai halaman yang tersaji memang memuat perubahanmu.'
   );
 }
 
